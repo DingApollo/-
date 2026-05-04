@@ -1,0 +1,9 @@
+/**/*.exe
+/**/MDK-ARM/*
+!/**/MDK-ARM/*.uvoptx
+!/**/MDK-ARM/*.uvprojx
+!/**/MDK-ARM/startup_*.s
+/**/cmake-build-debug
+/**/.vscode
+/**/workspace.code-workspace
+/**/.idea
