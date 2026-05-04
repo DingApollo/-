@@ -7,3 +7,7 @@
 /**/.vscode
 /**/workspace.code-workspace
 /**/.idea
+
+# 根目录个人文档不入库（文件仍保留在本地）
+/*.md
+!README.md
