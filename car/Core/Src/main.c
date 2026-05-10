@@ -44,7 +44,8 @@
 #define PWM_START_BOOST 2800
 #define PWM_START_BOOST_MS 200
 #define PID_PERIOD_MS 10
-#define PLOT_PERIOD_MS 500
+#define PID_I_SEP_ERR 8.0f
+#define PLOT_PERIOD_MS 100
 #define PLOT_SEND_DIV (PLOT_PERIOD_MS / PID_PERIOD_MS)
 #define PID_PARAM_MAGIC 0x50494431UL
 #define PID_PARAM_FLASH_ADDR 0x080E0000UL
@@ -53,10 +54,30 @@
 #define LEFT_BACKWARD_CH  TIM_CHANNEL_2
 #define RIGHT_FORWARD_CH  TIM_CHANNEL_3
 #define RIGHT_BACKWARD_CH TIM_CHANNEL_4
+#define CTRL_SRC_UART 0U
+#define CTRL_SRC_PS2  1U
+#define PS2_SHIFT_DELAY_US 5U
+#define PS2_BYTE_DELAY_US  4U
+#define PS2_POLL_PERIOD_MS 20U
+#define PS2_DEBUG_PERIOD_MS 200U
+#define PS2_FAILSAFE_MS 300U
+#define PS2_RECONFIG_PERIOD_MS 500U
+#define PS2_AXIS_CENTER 128
+#define PS2_AXIS_DEADZONE 18
+#define PS2_PWM_MAX 3000
+#define PS2_TURN_GAIN_NUM 3
+#define PS2_TURN_GAIN_DEN 4
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
+#define PS2_CLK_HIGH() HAL_GPIO_WritePin(PS2_CLK_GPIO_Port, PS2_CLK_Pin, GPIO_PIN_SET)
+#define PS2_CLK_LOW()  HAL_GPIO_WritePin(PS2_CLK_GPIO_Port, PS2_CLK_Pin, GPIO_PIN_RESET)
+#define PS2_CMD_HIGH() HAL_GPIO_WritePin(PS2_CMD_GPIO_Port, PS2_CMD_Pin, GPIO_PIN_SET)
+#define PS2_CMD_LOW()  HAL_GPIO_WritePin(PS2_CMD_GPIO_Port, PS2_CMD_Pin, GPIO_PIN_RESET)
+#define PS2_CS_HIGH()  HAL_GPIO_WritePin(PS2_CS_GPIO_Port, PS2_CS_Pin, GPIO_PIN_SET)
+#define PS2_CS_LOW()   HAL_GPIO_WritePin(PS2_CS_GPIO_Port, PS2_CS_Pin, GPIO_PIN_RESET)
+#define PS2_DAT_READ() HAL_GPIO_ReadPin(PS2_DAT_GPIO_Port, PS2_DAT_Pin)
 
 /* USER CODE END PM */
 
@@ -90,6 +111,8 @@ static float pid_kp = 18.0f;
 static float pid_ki = 0.8f;
 static float pid_kd = 0.0f;
 static float pid_kff = 55.0f;
+static float pid_kff_high = 50.0f;
+static float pid_kff_split = 20.0f;
 static float pid_i_left = 0.0f;
 static float pid_i_right = 0.0f;
 static float pid_prev_e_left = 0.0f;
@@ -102,6 +125,24 @@ static volatile uint32_t uart3_last_arm_tick = 0;
 static volatile uint32_t uart3_last_rx_tick = 0;
 static volatile uint32_t uart3_last_recover_tick = 0;
 static volatile uint8_t uart3_need_rearm = 0;
+static uint8_t ctrl_source = CTRL_SRC_UART;
+static uint8_t ps2_enabled = 0;
+static uint8_t ps2_online = 0;
+static uint8_t ps2_debug_enabled = 0;
+static uint8_t ps2_mode = 0xFF;
+static uint8_t ps2_frame[9];
+static uint8_t ps2_lx = PS2_AXIS_CENTER;
+static uint8_t ps2_ly = PS2_AXIS_CENTER;
+static uint8_t ps2_rx = PS2_AXIS_CENTER;
+static uint8_t ps2_ry = PS2_AXIS_CENTER;
+static uint16_t ps2_buttons = 0xFFFFU;
+static int16_t ps2_cmd_left = 0;
+static int16_t ps2_cmd_right = 0;
+static uint32_t ps2_last_poll_tick = 0;
+static uint32_t ps2_last_ok_tick = 0;
+static uint32_t ps2_last_debug_tick = 0;
+static uint32_t ps2_last_config_tick = 0;
+static uint8_t dwt_delay_ready = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -120,6 +161,7 @@ static int16_t pid_step(
   float *i_term,
   float *prev_e
 );
+static float pid_effective_kff(int16_t target);
 static void pid_reset_state(void);
 static void pid_load_params(void);
 static HAL_StatusTypeDef pid_save_params(void);
@@ -131,10 +173,238 @@ static void Motor_Set(int16_t left, int16_t right);
 static void Motor_Stop(void);
 static int parse_two_ints(const char *s, int *out_l, int *out_r);
 static void VOFA_HandleLine(const char *line);
+static void dwt_delay_init(void);
+static void delay_us(uint32_t us);
+static uint8_t ps2_shift_byte(uint8_t tx);
+static void ps2_transfer(const uint8_t *tx, uint8_t *rx, uint8_t len);
+static uint8_t ps2_read_frame(uint8_t *frame);
+static uint8_t ps2_configure(void);
+static int16_t ps2_axis_to_pwm(uint8_t raw, uint8_t invert);
+static void ps2_update_drive(void);
+static void ps2_poll(void);
+static void ps2_disable(void);
+static const char *ctrl_source_name(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static const uint8_t ps2_cmd_read_data[9] = {0x01U, 0x42U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U};
+static const uint8_t ps2_cmd_enter_config[5] = {0x01U, 0x43U, 0x00U, 0x01U, 0x00U};
+static const uint8_t ps2_cmd_set_mode[9] = {0x01U, 0x44U, 0x00U, 0x01U, 0x03U, 0x00U, 0x00U, 0x00U, 0x00U};
+static const uint8_t ps2_cmd_exit_config[9] = {0x01U, 0x43U, 0x00U, 0x00U, 0x5AU, 0x5AU, 0x5AU, 0x5AU, 0x5AU};
+
+static void dwt_delay_init(void)
+{
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0U;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+  dwt_delay_ready = ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0U) ? 1U : 0U;
+}
+
+static void delay_us(uint32_t us)
+{
+  if ((us == 0U) || (SystemCoreClock == 0U)) {
+    return;
+  }
+
+  if (dwt_delay_ready != 0U) {
+    uint32_t start = DWT->CYCCNT;
+    uint32_t ticks = (SystemCoreClock / 1000000U) * us;
+    while ((DWT->CYCCNT - start) < ticks) {
+    }
+  } else {
+    volatile uint32_t loops = (SystemCoreClock / 8000000U) * us;
+    while (loops-- > 0U) {
+      __NOP();
+    }
+  }
+}
+
+static uint8_t ps2_shift_byte(uint8_t tx)
+{
+  uint8_t rx = 0;
+
+  for (uint8_t i = 0; i < 8U; i++) {
+    if ((tx & (1U << i)) != 0U) {
+      PS2_CMD_HIGH();
+    } else {
+      PS2_CMD_LOW();
+    }
+
+    PS2_CLK_LOW();
+    delay_us(PS2_SHIFT_DELAY_US);
+
+    if (PS2_DAT_READ() == GPIO_PIN_SET) {
+      rx |= (uint8_t)(1U << i);
+    }
+
+    PS2_CLK_HIGH();
+    delay_us(PS2_SHIFT_DELAY_US);
+  }
+
+  PS2_CMD_HIGH();
+  delay_us(PS2_BYTE_DELAY_US);
+  return rx;
+}
+
+static void ps2_transfer(const uint8_t *tx, uint8_t *rx, uint8_t len)
+{
+  PS2_CMD_HIGH();
+  PS2_CLK_HIGH();
+  PS2_CS_LOW();
+  delay_us(PS2_BYTE_DELAY_US);
+
+  for (uint8_t i = 0; i < len; i++) {
+    uint8_t value = ps2_shift_byte(tx[i]);
+    if (rx != NULL) {
+      rx[i] = value;
+    }
+  }
+
+  PS2_CS_HIGH();
+  delay_us(PS2_BYTE_DELAY_US);
+}
+
+static uint8_t ps2_read_frame(uint8_t *frame)
+{
+  memset(frame, 0xFF, 9U);
+  ps2_transfer(ps2_cmd_read_data, frame, 9U);
+  return (frame[1] == 0x41U || frame[1] == 0x73U || frame[1] == 0x79U) ? 1U : 0U;
+}
+
+static uint8_t ps2_configure(void)
+{
+  uint8_t frame[9];
+
+  ps2_last_config_tick = HAL_GetTick();
+  ps2_online = 0U;
+  ps2_mode = 0xFFU;
+
+  (void)ps2_read_frame(frame);
+  HAL_Delay(1);
+  if (ps2_read_frame(frame) != 0U && ((frame[1] & 0xF0U) == 0x70U)) {
+    ps2_online = 1U;
+    ps2_mode = frame[1];
+    ps2_last_ok_tick = HAL_GetTick();
+    return 1U;
+  }
+
+  for (uint8_t retry = 0; retry < 5U; retry++) {
+    ps2_transfer(ps2_cmd_enter_config, NULL, sizeof(ps2_cmd_enter_config));
+    HAL_Delay(1);
+    ps2_transfer(ps2_cmd_set_mode, NULL, sizeof(ps2_cmd_set_mode));
+    HAL_Delay(1);
+    ps2_transfer(ps2_cmd_exit_config, NULL, sizeof(ps2_cmd_exit_config));
+    HAL_Delay(2);
+
+    if (ps2_read_frame(frame) != 0U && ((frame[1] & 0xF0U) == 0x70U)) {
+      ps2_online = 1U;
+      ps2_mode = frame[1];
+      ps2_last_ok_tick = HAL_GetTick();
+      return 1U;
+    }
+  }
+
+  return 0U;
+}
+
+static int16_t ps2_axis_to_pwm(uint8_t raw, uint8_t invert)
+{
+  int16_t centered = invert != 0U
+    ? (int16_t)PS2_AXIS_CENTER - (int16_t)raw
+    : (int16_t)raw - (int16_t)PS2_AXIS_CENTER;
+  int32_t scaled = 0;
+
+  if (centered > -PS2_AXIS_DEADZONE && centered < PS2_AXIS_DEADZONE) {
+    return 0;
+  }
+
+  if (centered > 0) {
+    centered -= PS2_AXIS_DEADZONE;
+  } else {
+    centered += PS2_AXIS_DEADZONE;
+  }
+
+  scaled = ((int32_t)centered * (int32_t)PS2_PWM_MAX) / (127 - PS2_AXIS_DEADZONE);
+  if (scaled > PS2_PWM_MAX) scaled = PS2_PWM_MAX;
+  if (scaled < -PS2_PWM_MAX) scaled = -PS2_PWM_MAX;
+  return (int16_t)scaled;
+}
+
+static void ps2_update_drive(void)
+{
+  int16_t forward = 0;
+  int16_t turn = 0;
+  int32_t left = 0;
+  int32_t right = 0;
+
+  if (ps2_online == 0U) {
+    ps2_cmd_left = 0;
+    ps2_cmd_right = 0;
+    return;
+  }
+
+  /* LX/LY 与前进/转向对调（部分接收器/摇杆映射与常见 PS2 相反） */
+  forward = ps2_axis_to_pwm(ps2_lx, 1U);
+  turn = ps2_axis_to_pwm(ps2_ly, 0U);
+  turn = (int16_t)(((int32_t)turn * PS2_TURN_GAIN_NUM) / PS2_TURN_GAIN_DEN);
+
+  left = (int32_t)forward + (int32_t)turn;
+  right = (int32_t)forward - (int32_t)turn;
+
+  if (left > PS2_PWM_MAX) left = PS2_PWM_MAX;
+  if (left < -PS2_PWM_MAX) left = -PS2_PWM_MAX;
+  if (right > PS2_PWM_MAX) right = PS2_PWM_MAX;
+  if (right < -PS2_PWM_MAX) right = -PS2_PWM_MAX;
+
+  ps2_cmd_left = (int16_t)left;
+  ps2_cmd_right = (int16_t)right;
+}
+
+static void ps2_poll(void)
+{
+  if (ps2_read_frame(ps2_frame) != 0U && ((ps2_frame[1] & 0xF0U) == 0x70U)) {
+    ps2_online = 1U;
+    ps2_mode = ps2_frame[1];
+    ps2_buttons = (uint16_t)(((uint16_t)ps2_frame[4] << 8) | ps2_frame[3]);
+    ps2_rx = ps2_frame[5];
+    ps2_ry = ps2_frame[6];
+    ps2_lx = ps2_frame[7];
+    ps2_ly = ps2_frame[8];
+    ps2_last_ok_tick = HAL_GetTick();
+    ps2_update_drive();
+    return;
+  }
+
+  ps2_online = 0U;
+  ps2_mode = ps2_frame[1];
+  ps2_cmd_left = 0;
+  ps2_cmd_right = 0;
+
+  if ((HAL_GetTick() - ps2_last_config_tick) >= PS2_RECONFIG_PERIOD_MS) {
+    (void)ps2_configure();
+  }
+}
+
+static void ps2_disable(void)
+{
+  ps2_enabled = 0U;
+  ps2_online = 0U;
+  ps2_debug_enabled = 0U;
+  ps2_mode = 0xFFU;
+  ps2_lx = PS2_AXIS_CENTER;
+  ps2_ly = PS2_AXIS_CENTER;
+  ps2_rx = PS2_AXIS_CENTER;
+  ps2_ry = PS2_AXIS_CENTER;
+  ps2_buttons = 0xFFFFU;
+  ps2_cmd_left = 0;
+  ps2_cmd_right = 0;
+}
+
+static const char *ctrl_source_name(void)
+{
+  return (ctrl_source == CTRL_SRC_PS2) ? "PS2" : "UART";
+}
 /* USER CODE END 0 */
 
 /**
@@ -185,8 +455,40 @@ int main(void)
   enc_last_right = (int32_t)__HAL_TIM_GET_COUNTER(&htim4);
   uart3_last_rx_tick = HAL_GetTick();
   uart3_last_recover_tick = HAL_GetTick();
+  dwt_delay_init();
+  ps2_last_ok_tick = HAL_GetTick();
+  ps2_last_config_tick = HAL_GetTick();
   if (uart3_start_rx_to_idle() != HAL_OK) {
     uart3_need_rearm = 1;
+  }
+  {
+    char boot_msg[128];
+    int boot_n = snprintf(
+      boot_msg,
+      sizeof(boot_msg),
+      "BOOT:USART3,115200,READY,RST=%s%s%s%s%s%s%s\r\n",
+      __HAL_RCC_GET_FLAG(RCC_FLAG_PINRST) ? "PIN|" : "",
+      __HAL_RCC_GET_FLAG(RCC_FLAG_PORRST) ? "POR|" : "",
+      __HAL_RCC_GET_FLAG(RCC_FLAG_SFTRST) ? "SFT|" : "",
+      __HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST) ? "IWDG|" : "",
+      __HAL_RCC_GET_FLAG(RCC_FLAG_WWDGRST) ? "WWDG|" : "",
+      __HAL_RCC_GET_FLAG(RCC_FLAG_BORRST) ? "BOR|" : "",
+      __HAL_RCC_GET_FLAG(RCC_FLAG_LPWRRST) ? "LPWR|" : ""
+    );
+    if (boot_n > 0) {
+      HAL_UART_Transmit(&huart3, (uint8_t *)boot_msg, (uint16_t)boot_n, 30);
+    }
+    __HAL_RCC_CLEAR_RESET_FLAGS();
+  }
+
+  /* 上电默认手柄：握手成功则 CTRL=PS2（等价手动 PS2EN=1 + CTRL=PS2）；失败保持 UART */
+  if (ps2_configure() != 0U) {
+    ps2_enabled = 1U;
+    ctrl_source = CTRL_SRC_PS2;
+    pid_enabled = 0U;
+    pid_reset_state();
+    ps2_last_poll_tick = 0U;
+    Motor_Stop();
   }
   /* USER CODE END 2 */
 
@@ -197,6 +499,40 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    if (ps2_enabled != 0U &&
+        (HAL_GetTick() - ps2_last_poll_tick) >= PS2_POLL_PERIOD_MS) {
+      ps2_last_poll_tick = HAL_GetTick();
+      ps2_poll();
+    }
+
+    if (ps2_enabled != 0U &&
+        ps2_debug_enabled != 0U &&
+        !plot_enabled &&
+        ((HAL_GetTick() - ps2_last_debug_tick) >= PS2_DEBUG_PERIOD_MS))
+    {
+      char ps2_line[128];
+      int ps2_n = snprintf(
+        ps2_line,
+        sizeof(ps2_line),
+        "PS2:EN=%u,ONLINE=%u,MODE=0x%02X,LX=%u,LY=%u,RX=%u,RY=%u,BTN=0x%04X,CTRL=%s,CMD=%d,%d\r\n",
+        (unsigned int)ps2_enabled,
+        (unsigned int)ps2_online,
+        (unsigned int)ps2_mode,
+        (unsigned int)ps2_lx,
+        (unsigned int)ps2_ly,
+        (unsigned int)ps2_rx,
+        (unsigned int)ps2_ry,
+        (unsigned int)ps2_buttons,
+        ctrl_source_name(),
+        ps2_cmd_left,
+        ps2_cmd_right
+      );
+      ps2_last_debug_tick = HAL_GetTick();
+      if (ps2_n > 0) {
+        HAL_UART_Transmit(&huart3, (uint8_t *)ps2_line, (uint16_t)ps2_n, 40);
+      }
+    }
+
     if (uart3_cmd_ready != 0U) {
       char line_local[96];
 
@@ -220,7 +556,25 @@ int main(void)
       }
 
       if (!estop_triggered) {
-        if (pid_enabled) {
+        if (ctrl_source == CTRL_SRC_PS2) {
+          if ((ps2_enabled == 0U) ||
+              (ps2_online == 0U) ||
+              ((HAL_GetTick() - ps2_last_ok_tick) > PS2_FAILSAFE_MS))
+          {
+            ps2_cmd_left = 0;
+            ps2_cmd_right = 0;
+            cmd_left = 0;
+            cmd_right = 0;
+            target_left = 0;
+            target_right = 0;
+            pid_reset_state();
+          } else {
+            cmd_left = ps2_cmd_left;
+            cmd_right = ps2_cmd_right;
+            target_left = 0;
+            target_right = 0;
+          }
+        } else if (pid_enabled) {
           if (target_left == 0 && target_right == 0) {
             pid_i_left = 0.0f;
             pid_i_right = 0.0f;
@@ -273,9 +627,9 @@ int main(void)
       }
     }
 
-    /* 若串口状态长期异常，执行一次完整软恢复，避免必须按硬件RST */
+    /* 仅在接收启动失败或硬件报错时软恢复，避免空闲时反复重初始化 USART */
     if (((HAL_GetTick() - uart3_last_recover_tick) > 1000U) &&
-        (((HAL_GetTick() - uart3_last_rx_tick) > 1500U) || (uart3_need_rearm != 0U)))
+        ((uart3_need_rearm != 0U) || (huart3.ErrorCode != HAL_UART_ERROR_NONE)))
     {
       uart3_soft_recover();
     }
@@ -409,7 +763,9 @@ static int16_t pid_step(
 
   p_term = pid_kp * e;
 
-  *i_term += pid_ki * e * dt_s;
+  if (e <= PID_I_SEP_ERR && e >= -PID_I_SEP_ERR) {
+    *i_term += pid_ki * e * dt_s;
+  }
   if (*i_term > (float)PWM_MAX) *i_term = (float)PWM_MAX;
   if (*i_term < -(float)PWM_MAX) *i_term = -(float)PWM_MAX;
 
@@ -417,13 +773,24 @@ static int16_t pid_step(
     d_term = pid_kd * (e - *prev_e) / dt_s;
   }
 
-  ff_term = pid_kff * (float)target;
+  ff_term = pid_effective_kff(target) * (float)target;
   out = ff_term + p_term + (*i_term) + d_term;
   *prev_e = e;
 
   if (out > (float)PWM_MAX) out = (float)PWM_MAX;
   if (out < -(float)PWM_MAX) out = -(float)PWM_MAX;
   return (int16_t)out;
+}
+
+static float pid_effective_kff(int16_t target)
+{
+  int16_t abs_target = target;
+
+  if (abs_target < 0) {
+    abs_target = (int16_t)(-abs_target);
+  }
+
+  return ((float)abs_target <= pid_kff_split) ? pid_kff : pid_kff_high;
 }
 
 static void pid_reset_state(void)
@@ -444,6 +811,15 @@ static void pid_load_params(void)
     memcpy(&pid_kp, &flash[1], sizeof(float));
     memcpy(&pid_ki, &flash[2], sizeof(float));
     memcpy(&pid_kd, &flash[3], sizeof(float));
+    if (flash[5] != 0xFFFFFFFFUL) {
+      memcpy(&pid_kff, &flash[5], sizeof(float));
+    }
+    if (flash[6] != 0xFFFFFFFFUL) {
+      memcpy(&pid_kff_high, &flash[6], sizeof(float));
+    }
+    if (flash[7] != 0xFFFFFFFFUL) {
+      memcpy(&pid_kff_split, &flash[7], sizeof(float));
+    }
     if (flash[4] != 0xFFFFFFFFUL) {
       pid_enabled = (flash[4] & PID_FLAG_ENABLED) ? 1U : 0U;
     } else {
@@ -456,7 +832,7 @@ static HAL_StatusTypeDef pid_save_params(void)
 {
   FLASH_EraseInitTypeDef erase = {0};
   uint32_t sector_error = 0;
-  uint32_t words[5];
+  uint32_t words[8];
   HAL_StatusTypeDef st;
 
   words[0] = PID_PARAM_MAGIC;
@@ -464,6 +840,9 @@ static HAL_StatusTypeDef pid_save_params(void)
   memcpy(&words[2], &pid_ki, sizeof(float));
   memcpy(&words[3], &pid_kd, sizeof(float));
   words[4] = pid_enabled ? PID_FLAG_ENABLED : 0UL;
+  memcpy(&words[5], &pid_kff, sizeof(float));
+  memcpy(&words[6], &pid_kff_high, sizeof(float));
+  memcpy(&words[7], &pid_kff_split, sizeof(float));
 
   HAL_FLASH_Unlock();
 
@@ -475,7 +854,7 @@ static HAL_StatusTypeDef pid_save_params(void)
   st = HAL_FLASHEx_Erase(&erase, &sector_error);
   if (st == HAL_OK) {
     uint32_t addr = PID_PARAM_FLASH_ADDR;
-    for (uint32_t i = 0; i < 5; i++) {
+    for (uint32_t i = 0; i < 8; i++) {
       st = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, addr, words[i]);
       if (st != HAL_OK) {
         break;
@@ -641,6 +1020,18 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
       }
     }
 
+    /* 空闲帧且无换行：提交当前缓存为一行（适配单次突发、末尾不带 \\r\\n 的上位机） */
+    if (HAL_UARTEx_GetRxEventType(huart) == HAL_UART_RXEVENT_IDLE &&
+        uart3_line_len > 0U)
+    {
+      uart3_line_buf[uart3_line_len] = '\0';
+      if (uart3_cmd_ready == 0U) {
+        memcpy(uart3_cmd_buf, uart3_line_buf, sizeof(uart3_cmd_buf));
+        uart3_cmd_ready = 1;
+      }
+      uart3_line_len = 0;
+    }
+
     /* 重新开启中断接收 */
     if (uart3_start_rx_to_idle() == HAL_OK) {
       uart3_need_rearm = 0;
@@ -708,8 +1099,8 @@ static void VOFA_HandleLine(const char *line)
   int right = 0;
   int tmp_left = 0;
   int tmp_right = 0;
-  char ack[128];
-  char reply[160];
+  static char ack[160];
+  static char reply[384];
   char clean[32];
   size_t len = 0;
   const char *cmd = clean;
@@ -749,6 +1140,14 @@ static void VOFA_HandleLine(const char *line)
     return;
   }
 
+  {
+    char rx_echo[48];
+    int rx_n = snprintf(rx_echo, sizeof(rx_echo), "RX:%s\r\n", cmd);
+    if (rx_n > 0 && !plot_enabled) {
+      HAL_UART_Transmit(&huart3, (uint8_t *)rx_echo, (uint16_t)rx_n, 20);
+    }
+  }
+
   /* 绘图模式下，仅文本命令暂停数字流；纯数值目标命令不暂停 */
   if (!plot_enabled || !parse_two_ints(cmd, &tmp_left, &tmp_right)) {
     plot_pause_until = HAL_GetTick() + 1000U;
@@ -779,6 +1178,7 @@ static void VOFA_HandleLine(const char *line)
 
   if (strcmp(cmd, "PID=1") == 0)
   {
+    ctrl_source = CTRL_SRC_UART;
     pid_enabled = 1;
     target_left = 0;
     target_right = 0;
@@ -795,6 +1195,7 @@ static void VOFA_HandleLine(const char *line)
 
   if (strcmp(cmd, "PID=0") == 0)
   {
+    ctrl_source = CTRL_SRC_UART;
     pid_enabled = 0;
     target_left = 0;
     target_right = 0;
@@ -831,17 +1232,180 @@ static void VOFA_HandleLine(const char *line)
     return;
   }
 
+  if (strcmp(cmd, "PS2EN=1") == 0)
+  {
+    ps2_enabled = (ps2_configure() != 0U) ? 1U : 0U;
+    ps2_last_poll_tick = 0U;
+    n = snprintf(
+      reply,
+      sizeof(reply),
+      "PS2EN:%u,PS2:%u,MODE:0x%02X\r\n",
+      (unsigned int)ps2_enabled,
+      (unsigned int)ps2_online,
+      (unsigned int)ps2_mode
+    );
+    if (n > 0) {
+      HAL_UART_Transmit(&huart3, (uint8_t *)reply, (uint16_t)n, 30);
+    }
+    return;
+  }
+
+  if (strcmp(cmd, "PS2EN=0") == 0)
+  {
+    if (ctrl_source == CTRL_SRC_PS2) {
+      ctrl_source = CTRL_SRC_UART;
+      cmd_left = 0;
+      cmd_right = 0;
+      target_left = 0;
+      target_right = 0;
+      pid_reset_state();
+      Motor_Stop();
+    }
+    ps2_disable();
+    const char reply_ps2_en[] = "PS2EN:0\r\n";
+    HAL_UART_Transmit(&huart3, (uint8_t *)reply_ps2_en, sizeof(reply_ps2_en) - 1U, 20);
+    return;
+  }
+
+  if (strcmp(cmd, "PS2DBG=1") == 0)
+  {
+    ps2_debug_enabled = 1U;
+    const char reply_ps2_dbg[] = "PS2DBG:1\r\n";
+    HAL_UART_Transmit(&huart3, (uint8_t *)reply_ps2_dbg, sizeof(reply_ps2_dbg) - 1U, 20);
+    return;
+  }
+
+  if (strcmp(cmd, "PS2DBG=0") == 0)
+  {
+    ps2_debug_enabled = 0U;
+    const char reply_ps2_dbg[] = "PS2DBG:0\r\n";
+    HAL_UART_Transmit(&huart3, (uint8_t *)reply_ps2_dbg, sizeof(reply_ps2_dbg) - 1U, 20);
+    return;
+  }
+
+  if (strcmp(cmd, "PS2RAW") == 0)
+  {
+    uint8_t raw[9];
+    (void)ps2_read_frame(raw);
+    n = snprintf(
+      reply,
+      sizeof(reply),
+      "PS2RAW:%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X\r\n",
+      (unsigned int)raw[0],
+      (unsigned int)raw[1],
+      (unsigned int)raw[2],
+      (unsigned int)raw[3],
+      (unsigned int)raw[4],
+      (unsigned int)raw[5],
+      (unsigned int)raw[6],
+      (unsigned int)raw[7],
+      (unsigned int)raw[8]
+    );
+    if (n > 0) {
+      uint16_t tx_len = (n < (int)sizeof(reply)) ? (uint16_t)n : (uint16_t)(sizeof(reply) - 1U);
+      HAL_UART_Transmit(&huart3, (uint8_t *)reply, tx_len, 40);
+    }
+    return;
+  }
+
+  if (strcmp(cmd, "CTRL=PS2") == 0)
+  {
+    if (ps2_enabled == 0U) {
+      ps2_enabled = (ps2_configure() != 0U) ? 1U : 0U;
+    }
+    if (ps2_enabled == 0U) {
+      const char reply_ps2_fail[] = "CTRL:PS2,ERR:NO_PAD\r\n";
+      HAL_UART_Transmit(&huart3, (uint8_t *)reply_ps2_fail, sizeof(reply_ps2_fail) - 1U, 30);
+      return;
+    }
+    ctrl_source = CTRL_SRC_PS2;
+    pid_enabled = 0;
+    cmd_left = 0;
+    cmd_right = 0;
+    target_left = 0;
+    target_right = 0;
+    pid_reset_state();
+    Motor_Stop();
+    n = snprintf(reply, sizeof(reply), "CTRL:PS2,PS2:%u\r\n", (unsigned int)ps2_online);
+    if (n > 0) {
+      HAL_UART_Transmit(&huart3, (uint8_t *)reply, (uint16_t)n, 30);
+    }
+    return;
+  }
+
+  if (strcmp(cmd, "CTRL=UART") == 0)
+  {
+    ctrl_source = CTRL_SRC_UART;
+    cmd_left = 0;
+    cmd_right = 0;
+    target_left = 0;
+    target_right = 0;
+    pid_reset_state();
+    Motor_Stop();
+    const char reply_ctrl_uart[] = "CTRL:UART\r\n";
+    HAL_UART_Transmit(&huart3, (uint8_t *)reply_ctrl_uart, sizeof(reply_ctrl_uart) - 1U, 20);
+    return;
+  }
+
+  if (strcmp(cmd, "CTRL?") == 0)
+  {
+    n = snprintf(
+      reply,
+      sizeof(reply),
+      "CTRL:%s,PS2EN:%u,PS2:%u,MODE:0x%02X,LX:%u,LY:%u,CMD:%d,%d\r\n",
+      ctrl_source_name(),
+      (unsigned int)ps2_enabled,
+      (unsigned int)ps2_online,
+      (unsigned int)ps2_mode,
+      (unsigned int)ps2_lx,
+      (unsigned int)ps2_ly,
+      ps2_cmd_left,
+      ps2_cmd_right
+    );
+    if (n > 0) {
+      HAL_UART_Transmit(&huart3, (uint8_t *)reply, (uint16_t)n, 30);
+    }
+    return;
+  }
+
+  if (strcmp(cmd, "PS2?") == 0)
+  {
+    n = snprintf(
+      reply,
+      sizeof(reply),
+      "PS2EN:%u,PS2:%u,CTRL:%s,MODE:0x%02X,BTN:0x%04X,LX:%u,LY:%u,RX:%u,RY:%u,CMD:%d,%d\r\n",
+      (unsigned int)ps2_enabled,
+      (unsigned int)ps2_online,
+      ctrl_source_name(),
+      (unsigned int)ps2_mode,
+      (unsigned int)ps2_buttons,
+      (unsigned int)ps2_lx,
+      (unsigned int)ps2_ly,
+      (unsigned int)ps2_rx,
+      (unsigned int)ps2_ry,
+      ps2_cmd_left,
+      ps2_cmd_right
+    );
+    if (n > 0) {
+      uint16_t tx_len = (n < (int)sizeof(reply)) ? (uint16_t)n : (uint16_t)(sizeof(reply) - 1U);
+      HAL_UART_Transmit(&huart3, (uint8_t *)reply, tx_len, 40);
+    }
+    return;
+  }
+
   if (strcmp(cmd, "PID?") == 0)
   {
     n = snprintf(
       reply,
       sizeof(reply),
-      "PID:%u,KP:%.3f,KI:%.3f,KD:%.3f,KFF:%.3f,TGT:%d,%d,SPD:%d,%d\r\n",
+      "PID:%u,KP:%.3f,KI:%.3f,KD:%.3f,KFF:%.3f,KFFH:%.3f,KFFS:%.3f,TGT:%d,%d,SPD:%d,%d\r\n",
       (unsigned int)pid_enabled,
       (double)pid_kp,
       (double)pid_ki,
       (double)pid_kd,
       (double)pid_kff,
+      (double)pid_kff_high,
+      (double)pid_kff_split,
       target_left,
       target_right,
       speed_left,
@@ -864,9 +1428,15 @@ static void VOFA_HandleLine(const char *line)
     n = snprintf(
       reply,
       sizeof(reply),
-      "STATUS:PID=%u,PLOT=%u,ESTOP=%u,CMD=%d,%d,TGT=%d,%d,SPD=%d,%d,CCR=%lu,%lu,%lu,%lu,BOOST=%u,%u,KP=%.3f,KI=%.3f,KD=%.3f,KFF=%.3f\r\n",
+      "STATUS:CTRL=%s,PID=%u,PLOT=%u,PS2EN=%u,PS2=%u,MODE=0x%02X,LX=%u,LY=%u,ESTOP=%u,CMD=%d,%d,TGT=%d,%d,SPD=%d,%d,CCR=%lu,%lu,%lu,%lu,BOOST=%u,%u\r\n",
+      ctrl_source_name(),
       (unsigned int)pid_enabled,
       (unsigned int)plot_enabled,
+      (unsigned int)ps2_enabled,
+      (unsigned int)ps2_online,
+      (unsigned int)ps2_mode,
+      (unsigned int)ps2_lx,
+      (unsigned int)ps2_ly,
       (unsigned int)estop_triggered,
       cmd_left,
       cmd_right,
@@ -879,14 +1449,11 @@ static void VOFA_HandleLine(const char *line)
       (unsigned long)c3,
       (unsigned long)c4,
       (unsigned int)boost_l,
-      (unsigned int)boost_r,
-      (double)pid_kp,
-      (double)pid_ki,
-      (double)pid_kd,
-      (double)pid_kff
+      (unsigned int)boost_r
     );
     if (n > 0) {
-      HAL_UART_Transmit(&huart3, (uint8_t *)reply, (uint16_t)n, 40);
+      uint16_t tx_len = (n < (int)sizeof(reply)) ? (uint16_t)n : (uint16_t)(sizeof(reply) - 1U);
+      HAL_UART_Transmit(&huart3, (uint8_t *)reply, tx_len, 40);
     }
     return;
   }
@@ -935,8 +1502,30 @@ static void VOFA_HandleLine(const char *line)
     return;
   }
 
+  if (sscanf(cmd, "KFFH=%f", &pid_kff_high) == 1)
+  {
+    n = snprintf(reply, sizeof(reply), "KFFH:%.3f\r\n", (double)pid_kff_high);
+    if (n > 0) {
+      HAL_UART_Transmit(&huart3, (uint8_t *)reply, (uint16_t)n, 20);
+    }
+    return;
+  }
+
+  if (sscanf(cmd, "KFFS=%f", &pid_kff_split) == 1)
+  {
+    if (pid_kff_split < 1.0f) {
+      pid_kff_split = 1.0f;
+    }
+    n = snprintf(reply, sizeof(reply), "KFFS:%.3f\r\n", (double)pid_kff_split);
+    if (n > 0) {
+      HAL_UART_Transmit(&huart3, (uint8_t *)reply, (uint16_t)n, 20);
+    }
+    return;
+  }
+
   if (parse_two_ints(cmd, &left, &right))
   {
+    ctrl_source = CTRL_SRC_UART;
     if (left > PWM_MAX) left = PWM_MAX;
     if (left < -PWM_MAX) left = -PWM_MAX;
     if (right > PWM_MAX) right = PWM_MAX;
