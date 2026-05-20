@@ -90,12 +90,12 @@ typedef enum {
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define PWM_MAX 4199
-/* GitHub 2500/2200/2800；本车 MG540 起转需更高占空比 */
-#define PWM_START_MIN 4000
-#define PWM_RUN_MIN   4000
-#define PWM_START_BOOST 4199
-#define PWM_START_BOOST_MS 200
+#define PWM_MAX 4200
+/* TIM1 ARR=4199；CCR=4200 才是完整 100% 高电平，给 MG540 最大起转力 */
+#define PWM_START_MIN 4200
+#define PWM_RUN_MIN   4200
+#define PWM_START_BOOST 4200
+#define PWM_START_BOOST_MS 400
 #define PID_PERIOD_MS 10
 /* 串口目标按 0~80 发，内部映射为编码器约 0~40（满速实测） */
 #define PID_USER_FULL 80
@@ -127,18 +127,22 @@ typedef enum {
 #define H30_UART_BAUD_DEFAULT 460800U
 /* H30 姿态/角速度：原始值 ×1e-6 → 弧度 / 弧度每秒（与 H30? 一致） */
 #define BAL_DEBUG_PERIOD_MS 200U
-/* 增益单位：PWM/弧度；MG540 起转约 4000，0.2rad(约11°)≈满修正 */
-#define BAL_PITCH_KP_DEFAULT 20000.0f
-#define BAL_PITCH_KD_DEFAULT 500.0f
-#define BAL_ROLL_KP_DEFAULT 10000.0f
-#define BAL_ROLL_KD_DEFAULT 250.0f
-#define BAL_MAX_CORR_DEFAULT 12000.0f
-#define BAL_U_MIN_ACTIVE 8.0f
-/* 小角度不输出，避免 MG540 在起转边缘反复嗡鸣；约 2.3° 后再介入 */
-#define BAL_ANGLE_ACTIVE_RAD 0.040f
-#define BAL_TEST_ANGLE_RAD 0.012f
-#define BAL_PWM_MIN PWM_START_BOOST
-#define BAL_AUTO_ENABLE_DEFAULT 1U
+/* 平衡车式连续 PD：倾角+角速度始终参与，PWM 随偏差连续变化 */
+#define BAL_PITCH_KP_DEFAULT 28000.0f
+#define BAL_PITCH_KD_DEFAULT 800.0f
+#define BAL_ROLL_KP_DEFAULT 14000.0f
+#define BAL_ROLL_KD_DEFAULT 400.0f
+#define BAL_MAX_CORR_DEFAULT 5000.0f
+#define BAL_U_MIN_ACTIVE 1.0f
+/* 约 3.4° 时角度分量达到满 PWM；仅用于静止噪声抑制 */
+#define BAL_ANGLE_FULL_RAD   0.06f
+#define BAL_ANGLE_DEADBAND_RAD 0.003f
+#define BAL_GYRO_DEADBAND_RAD_S 0.025f
+/* 角速度大（晃 H30）时不判倒下，避免使劲晃反而被当成跌倒停机 */
+#define BAL_FALLEN_GYRO_MAX_RAD_S 0.45f
+#define PS2_BAL_QUIET_DEADZONE 32
+/* 默认关：避免未装 H30 时空闲平衡导致电机嗡鸣；需要时串口 BAL=1 或以后用手柄快捷键 */
+#define BAL_AUTO_ENABLE_DEFAULT 0U
 #define BAL_AUTO_ZERO_DELAY_MS 500U
 #define BAL_MAX_PITCH_RAD_DEFAULT 0.785398f
 #define BAL_MAX_ROLL_RAD_DEFAULT 0.610865f
@@ -153,8 +157,14 @@ typedef enum {
 /* 二值模式只取主方向，避免摇杆串扰导致 forward/turn 互相抵消 */
 #define PS2_AXIS_CARDINAL_ONLY 1
 /* PS2 按键位为低有效：按下时对应位为 0 */
-#define PS2_BTN_CROSS  0x4000U
-#define PS2_BTN_CIRCLE 0x2000U
+#define PS2_BTN_UP     0x0010U
+#define PS2_BTN_RIGHT  0x0020U
+#define PS2_BTN_DOWN   0x0040U
+#define PS2_BTN_LEFT   0x0080U
+#define PS2_BTN_CROSS     0x4000U
+#define PS2_BTN_CIRCLE    0x2000U
+#define PS2_BTN_TRIANGLE  0x1000U
+#define PS2_BTN_SQUARE    0x8000U
 #define PS2_BTN_PRESSED(btn, mask) (((btn) & (mask)) == 0U)
 /* USER CODE END PD */
 
@@ -225,6 +235,7 @@ static uint8_t ps2_ly = PS2_AXIS_CENTER;
 static uint8_t ps2_rx = PS2_AXIS_CENTER;
 static uint8_t ps2_ry = PS2_AXIS_CENTER;
 static uint16_t ps2_buttons = 0xFFFFU;
+static uint16_t ps2_buttons_prev = 0xFFFFU;
 static int16_t ps2_cmd_left = 0;
 static int16_t ps2_cmd_right = 0;
 static uint32_t ps2_last_poll_tick = 0;
@@ -327,11 +338,14 @@ static void delay_us(uint32_t us);
 static uint8_t ps2_shift_byte(uint8_t tx);
 static void ps2_transfer(const uint8_t *tx, uint8_t *rx, uint8_t len);
 static uint8_t ps2_axis_at_rest(uint8_t raw);
+static uint8_t ps2_drive_quiet(void);
 static uint8_t ps2_read_frame(uint8_t *frame);
 static uint8_t ps2_configure(void);
 static int16_t ps2_axis_to_pwm(uint8_t raw, uint8_t invert);
 static void ps2_scale_forward_turn(int32_t *forward, int32_t *turn);
 static void ps2_update_drive(void);
+static uint8_t ps2_btn_just_pressed(uint16_t mask);
+static uint8_t ps2_handle_buttons(void);
 static void ps2_poll(void);
 static void ps2_disable(void);
 static const char *ctrl_source_name(void);
@@ -443,7 +457,8 @@ static uint8_t ps2_configure(void)
 
   (void)ps2_read_frame(frame);
   HAL_Delay(1);
-  if (ps2_read_frame(frame) != 0U && ((frame[1] & 0xF0U) == 0x70U)) {
+  if (ps2_read_frame(frame) != 0U &&
+      (((frame[1] & 0xF0U) == 0x70U) || frame[1] == 0x41U)) {
     ps2_online = 1U;
     ps2_mode = frame[1];
     ps2_last_ok_tick = HAL_GetTick();
@@ -458,7 +473,8 @@ static uint8_t ps2_configure(void)
     ps2_transfer(ps2_cmd_exit_config, NULL, sizeof(ps2_cmd_exit_config));
     HAL_Delay(2);
 
-    if (ps2_read_frame(frame) != 0U && ((frame[1] & 0xF0U) == 0x70U)) {
+    if (ps2_read_frame(frame) != 0U &&
+        (((frame[1] & 0xF0U) == 0x70U) || frame[1] == 0x41U)) {
       ps2_online = 1U;
       ps2_mode = frame[1];
       ps2_last_ok_tick = HAL_GetTick();
@@ -467,6 +483,35 @@ static uint8_t ps2_configure(void)
   }
 
   return 0U;
+}
+
+static uint8_t ps2_axis_at_rest(uint8_t raw)
+{
+  int32_t d = (int32_t)raw - (int32_t)PS2_AXIS_CENTER;
+
+  if (d < 0) {
+    d = -d;
+  }
+  return (d <= (int32_t)PS2_BAL_QUIET_DEADZONE) ? 1U : 0U;
+}
+
+/* 摇杆在死区内且未按方向键，才允许 H30 平衡介入 */
+static uint8_t ps2_drive_quiet(void)
+{
+  if (ps2_online == 0U) {
+    return 1U;
+  }
+  if (ps2_axis_at_rest(ps2_lx) == 0U || ps2_axis_at_rest(ps2_ly) == 0U) {
+    return 0U;
+  }
+  if (PS2_BTN_PRESSED(ps2_buttons, PS2_BTN_UP) ||
+      PS2_BTN_PRESSED(ps2_buttons, PS2_BTN_DOWN) ||
+      PS2_BTN_PRESSED(ps2_buttons, PS2_BTN_LEFT) ||
+      PS2_BTN_PRESSED(ps2_buttons, PS2_BTN_RIGHT))
+  {
+    return 0U;
+  }
+  return 1U;
 }
 
 static int16_t ps2_axis_to_pwm(uint8_t raw, uint8_t invert)
@@ -553,6 +598,27 @@ static void ps2_update_drive(void)
     return;
   }
 
+  if (PS2_BTN_PRESSED(ps2_buttons, PS2_BTN_UP) ||
+      PS2_BTN_PRESSED(ps2_buttons, PS2_BTN_DOWN) ||
+      PS2_BTN_PRESSED(ps2_buttons, PS2_BTN_LEFT) ||
+      PS2_BTN_PRESSED(ps2_buttons, PS2_BTN_RIGHT))
+  {
+    if (PS2_BTN_PRESSED(ps2_buttons, PS2_BTN_UP) &&
+        !PS2_BTN_PRESSED(ps2_buttons, PS2_BTN_DOWN)) {
+      forward = (int16_t)PS2_PWM_MAX;
+    } else if (PS2_BTN_PRESSED(ps2_buttons, PS2_BTN_DOWN) &&
+               !PS2_BTN_PRESSED(ps2_buttons, PS2_BTN_UP)) {
+      forward = (int16_t)(-PS2_PWM_MAX);
+    }
+
+    if (PS2_BTN_PRESSED(ps2_buttons, PS2_BTN_RIGHT) &&
+        !PS2_BTN_PRESSED(ps2_buttons, PS2_BTN_LEFT)) {
+      turn = (int16_t)PS2_PWM_MAX;
+    } else if (PS2_BTN_PRESSED(ps2_buttons, PS2_BTN_LEFT) &&
+               !PS2_BTN_PRESSED(ps2_buttons, PS2_BTN_RIGHT)) {
+      turn = (int16_t)(-PS2_PWM_MAX);
+    }
+  } else {
   /* LX 前进、LY 转向（GitHub d89467d 差速模型） */
 #if PS2_AXIS_BINARY_OUTPUT && PS2_AXIS_CARDINAL_ONLY
   {
@@ -589,6 +655,7 @@ static void ps2_update_drive(void)
   turn = ps2_axis_to_pwm(ps2_ly, 0U);
   turn = (int16_t)(((int32_t)turn * PS2_TURN_GAIN_NUM) / PS2_TURN_GAIN_DEN);
 #endif
+  }
 
   {
     int32_t fwd = (int32_t)forward;
@@ -597,6 +664,9 @@ static void ps2_update_drive(void)
     forward = (int16_t)fwd;
     turn = (int16_t)trn;
   }
+
+  /* 本车 LY/方向键与差速转向相反，取反后左摇杆左转、右摇杆右转 */
+  turn = (int16_t)(-turn);
 
   left = (int32_t)forward + (int32_t)turn;
   right = (int32_t)forward - (int32_t)turn;
@@ -610,37 +680,94 @@ static void ps2_update_drive(void)
   ps2_cmd_right = (int16_t)right;
 }
 
+static uint8_t ps2_btn_just_pressed(uint16_t mask)
+{
+  return (PS2_BTN_PRESSED(ps2_buttons, mask) &&
+          !PS2_BTN_PRESSED(ps2_buttons_prev, mask)) ? 1U : 0U;
+}
+
+/* 无电脑现场测试：△ 开关平衡，□ 开关强测试模式；返回 1 表示本帧已急停勿再驱动 */
+static uint8_t ps2_handle_buttons(void)
+{
+  if (ps2_btn_just_pressed(PS2_BTN_CROSS)) {
+    estop_triggered = 1U;
+    cmd_left = 0;
+    cmd_right = 0;
+    target_left = 0;
+    target_right = 0;
+    ps2_cmd_left = 0;
+    ps2_cmd_right = 0;
+    pid_reset_state();
+    Motor_Stop();
+    ps2_buttons_prev = ps2_buttons;
+    return 1U;
+  }
+
+  if (ps2_btn_just_pressed(PS2_BTN_CIRCLE)) {
+    estop_triggered = 0U;
+    balance_zero_now();
+    cmd_left = 0;
+    cmd_right = 0;
+    target_left = 0;
+    target_right = 0;
+    pid_reset_state();
+    Motor_Stop();
+  }
+
+  if (ps2_btn_just_pressed(PS2_BTN_TRIANGLE)) {
+    bal_enabled ^= 1U;
+    bal_test_mode = 0U;
+    bal_fallen = 0U;
+    if (bal_enabled != 0U) {
+      bal_auto_zero_pending = 1U;
+      bal_stable_since = 0U;
+      /* 立刻用当前姿态作零点，避免只按 △ 后约 0.5s 内晃 H30 无反应（STA=6） */
+      if (balance_h30_online() != 0U) {
+        balance_zero_now();
+      } else {
+        bal_zero_valid = 0U;
+      }
+    }
+  }
+
+  if (ps2_btn_just_pressed(PS2_BTN_SQUARE)) {
+    bal_test_mode ^= 1U;
+    bal_fallen = 0U;
+    if (bal_test_mode != 0U) {
+      bal_enabled = 1U;
+      bal_auto_zero_pending = 1U;
+      bal_zero_valid = 0U;
+      bal_stable_since = 0U;
+    }
+  }
+
+  ps2_buttons_prev = ps2_buttons;
+  return 0U;
+}
+
 static void ps2_poll(void)
 {
-  if (ps2_read_frame(ps2_frame) != 0U && ((ps2_frame[1] & 0xF0U) == 0x70U)) {
+  uint32_t now = HAL_GetTick();
+
+  if (ps2_read_frame(ps2_frame) != 0U &&
+      (((ps2_frame[1] & 0xF0U) == 0x70U) || ps2_frame[1] == 0x41U)) {
     ps2_online = 1U;
     ps2_mode = ps2_frame[1];
     ps2_buttons = (uint16_t)(((uint16_t)ps2_frame[4] << 8) | ps2_frame[3]);
-    ps2_rx = ps2_frame[5];
-    ps2_ry = ps2_frame[6];
-    ps2_lx = ps2_frame[7];
-    ps2_ly = ps2_frame[8];
-    ps2_last_ok_tick = HAL_GetTick();
+    if ((ps2_frame[1] & 0xF0U) == 0x70U) {
+      ps2_rx = ps2_frame[5];
+      ps2_ry = ps2_frame[6];
+      ps2_lx = ps2_frame[7];
+      ps2_ly = ps2_frame[8];
+    } else {
+      ps2_rx = PS2_AXIS_CENTER;
+      ps2_ry = PS2_AXIS_CENTER;
+      ps2_lx = PS2_AXIS_CENTER;
+      ps2_ly = PS2_AXIS_CENTER;
+    }
+    ps2_last_ok_tick = now;
 
-    if (PS2_BTN_PRESSED(ps2_buttons, PS2_BTN_CIRCLE)) {
-      estop_triggered = 0U;
-      balance_zero_now();
-      cmd_left = 0;
-      cmd_right = 0;
-      target_left = 0;
-      target_right = 0;
-      pid_reset_state();
-      Motor_Stop();
-    } else if (PS2_BTN_PRESSED(ps2_buttons, PS2_BTN_CROSS)) {
-      estop_triggered = 1U;
-      cmd_left = 0;
-      cmd_right = 0;
-      target_left = 0;
-      target_right = 0;
-      ps2_cmd_left = 0;
-      ps2_cmd_right = 0;
-      pid_reset_state();
-      Motor_Stop();
+    if (ps2_handle_buttons() != 0U) {
       return;
     }
 
@@ -648,12 +775,14 @@ static void ps2_poll(void)
     return;
   }
 
-  ps2_online = 0U;
   ps2_mode = ps2_frame[1];
-  ps2_cmd_left = 0;
-  ps2_cmd_right = 0;
+  if ((now - ps2_last_ok_tick) > PS2_FAILSAFE_MS) {
+    ps2_online = 0U;
+    ps2_cmd_left = 0;
+    ps2_cmd_right = 0;
+  }
 
-  if ((HAL_GetTick() - ps2_last_config_tick) >= PS2_RECONFIG_PERIOD_MS) {
+  if ((now - ps2_last_config_tick) >= PS2_RECONFIG_PERIOD_MS) {
     (void)ps2_configure();
   }
 }
@@ -669,6 +798,7 @@ static void ps2_disable(void)
   ps2_rx = PS2_AXIS_CENTER;
   ps2_ry = PS2_AXIS_CENTER;
   ps2_buttons = 0xFFFFU;
+  ps2_buttons_prev = 0xFFFFU;
   ps2_cmd_left = 0;
   ps2_cmd_right = 0;
 }
@@ -966,29 +1096,12 @@ int main(void)
             target_right = 0;
             pid_reset_state();
           } else {
-            if (pid_enabled) {
-              target_left = ps2_pwm_to_pid_target(ps2_cmd_left);
-              target_right = ps2_pwm_to_pid_target(ps2_cmd_right);
-
-              if (target_left == 0 && target_right == 0) {
-                pid_i_left = 0.0f;
-                pid_i_right = 0.0f;
-                pid_prev_e_left = 0.0f;
-                pid_prev_e_right = 0.0f;
-                cmd_left = 0;
-                cmd_right = 0;
-              } else {
-                pid_out_left = pid_step(target_left, speed_left, &pid_i_left, &pid_prev_e_left);
-                pid_out_right = pid_step(target_right, speed_right, &pid_i_right, &pid_prev_e_right);
-                cmd_left = pid_out_left;
-                cmd_right = pid_out_right;
-              }
-            } else {
-              cmd_left = ps2_cmd_left;
-              cmd_right = ps2_cmd_right;
-              target_left = 0;
-              target_right = 0;
-            }
+            /* 手柄一律开环直连 PWM（含死区补偿），避免 Flash 里 PID=1 时输出仅两千级只响不转 */
+            cmd_left = ps2_cmd_left;
+            cmd_right = ps2_cmd_right;
+            target_left = 0;
+            target_right = 0;
+            pid_reset_state();
           }
         } else if (pid_enabled) {
           if (target_left == 0 && target_right == 0) {
@@ -1016,7 +1129,7 @@ int main(void)
            */
           if (ctrl_source == CTRL_SRC_PS2 &&
               bal_test_mode == 0U &&
-              (cmd_left != 0 || cmd_right != 0))
+              ps2_drive_quiet() == 0U)
           {
             balance_allowed = 0U;
             bal_last_sta = 7U;
@@ -1629,27 +1742,47 @@ static float balance_clampf(float v, float lo, float hi)
   return v;
 }
 
-/* 平衡环输出映射到 MG540 可转的 PWM（本车平衡修正必须直接给起转满占空比） */
-static int16_t balance_u_to_pwm(float u)
+/* 平衡车：|u| 与 |倾角| 取较大者映射 PWM，小角也持续修正 */
+static int16_t balance_pd_to_pwm(float angle_err, float u_pd)
 {
+  float abs_u;
+  float abs_a;
+  float scale_u;
+  float scale_a;
+  float scale;
   int32_t mag;
   int16_t sign;
 
-  if (u > -BAL_U_MIN_ACTIVE && u < BAL_U_MIN_ACTIVE) {
+  abs_u = fabsf(u_pd);
+  abs_a = fabsf(angle_err);
+
+  scale_u = abs_u / bal_max_corr;
+  scale_a = abs_a / BAL_ANGLE_FULL_RAD;
+  scale = scale_u;
+  if (scale_a > scale) {
+    scale = scale_a;
+  }
+  if (scale > 1.0f) {
+    scale = 1.0f;
+  }
+  if (scale <= 0.0f || (abs_u < BAL_U_MIN_ACTIVE && abs_a < BAL_ANGLE_DEADBAND_RAD)) {
     return 0;
   }
 
-  sign = (u >= 0.0f) ? 1 : -1;
-  mag = (int32_t)fabsf(u);
-  if (mag < (int32_t)BAL_PWM_MIN) {
-    mag = (int32_t)BAL_PWM_MIN;
-  }
+  mag = (int32_t)(scale * (float)PWM_MAX);
   if (mag > (int32_t)PWM_MAX) {
     mag = (int32_t)PWM_MAX;
   }
-  if (bal_test_mode != 0U) {
-    mag = (int32_t)PWM_START_BOOST;
+  if (mag <= 0) {
+    return 0;
   }
+
+  if (abs_u >= BAL_U_MIN_ACTIVE) {
+    sign = (u_pd >= 0.0f) ? 1 : -1;
+  } else {
+    sign = (angle_err >= 0.0f) ? 1 : -1;
+  }
+
   return (int16_t)(sign * mag);
 }
 
@@ -1679,8 +1812,11 @@ static void balance_apply(int16_t *left, int16_t *right)
     return;
   }
   if (bal_zero_valid == 0U) {
-    bal_last_sta = 6U;
-    return;
+    balance_zero_now();
+    if (bal_zero_valid == 0U) {
+      bal_last_sta = 6U;
+      return;
+    }
   }
 
   balance_snapshot(&pitch_rad, &roll_rad, &gyro_pitch, &gyro_roll);
@@ -1693,7 +1829,10 @@ static void balance_apply(int16_t *left, int16_t *right)
   bal_last_roll_err = roll_err;
 
   if (bal_test_mode == 0U &&
-      ((fabsf(pitch_err) > bal_max_pitch_rad) || (fabsf(roll_err) > bal_max_roll_rad)))
+      (((fabsf(pitch_err) > bal_max_pitch_rad) &&
+        (fabsf(gyro_pitch) < BAL_FALLEN_GYRO_MAX_RAD_S)) ||
+       ((fabsf(roll_err) > bal_max_roll_rad) &&
+        (fabsf(gyro_roll) < BAL_FALLEN_GYRO_MAX_RAD_S))))
   {
     bal_fallen = 1U;
     bal_last_sta = 3U;
@@ -1706,34 +1845,12 @@ static void balance_apply(int16_t *left, int16_t *right)
 
   bal_fallen = 0U;
 
-  if (bal_test_mode != 0U) {
-  if ((fabsf(pitch_err) > BAL_TEST_ANGLE_RAD) || (fabsf(roll_err) > BAL_TEST_ANGLE_RAD)) {
-      int16_t mp = 0;
-      int16_t mr = 0;
-
-      if (fabsf(pitch_err) > BAL_TEST_ANGLE_RAD) {
-        mp = (pitch_err > 0.0f) ? (int16_t)PWM_START_BOOST : (int16_t)(-PWM_START_BOOST);
-      }
-      if (fabsf(roll_err) > BAL_TEST_ANGLE_RAD) {
-        mr = (roll_err > 0.0f) ? (int16_t)PWM_START_BOOST : (int16_t)(-PWM_START_BOOST);
-      }
-      *left = (int16_t)(mp + mr);
-      *right = (int16_t)(mp - mr);
-      bal_last_u_pitch = (float)mp;
-      bal_last_u_roll = (float)mr;
-      bal_last_motor_l = *left;
-      bal_last_motor_r = *right;
-      bal_last_sta = 5U;
-    } else {
-      *left = 0;
-      *right = 0;
-      bal_last_sta = 4U;
-    }
-    return;
-  }
-
-  if ((fabsf(pitch_err) < BAL_ANGLE_ACTIVE_RAD) &&
-      (fabsf(roll_err) < BAL_ANGLE_ACTIVE_RAD))
+  /* 近似水平且角速度很小时不输出，避免静止嗡鸣；任意可察倾角即进入平衡车修正 */
+  if (bal_test_mode == 0U &&
+      (fabsf(pitch_err) < BAL_ANGLE_DEADBAND_RAD) &&
+      (fabsf(roll_err) < BAL_ANGLE_DEADBAND_RAD) &&
+      (fabsf(gyro_pitch) < BAL_GYRO_DEADBAND_RAD_S) &&
+      (fabsf(gyro_roll) < BAL_GYRO_DEADBAND_RAD_S))
   {
     bal_last_sta = 4U;
     bal_last_u_pitch = 0.0f;
@@ -1751,10 +1868,10 @@ static void balance_apply(int16_t *left, int16_t *right)
   bal_last_u_roll = u_roll;
 
   {
-    int16_t pwm_pitch_l = balance_u_to_pwm(u_pitch);
+    int16_t pwm_pitch_l = balance_pd_to_pwm(pitch_err, u_pitch);
     int16_t pwm_pitch_r = pwm_pitch_l;
-    int16_t pwm_roll_l = balance_u_to_pwm(u_roll);
-    int16_t pwm_roll_r = balance_u_to_pwm(-u_roll);
+    int16_t pwm_roll_l = balance_pd_to_pwm(roll_err, u_roll);
+    int16_t pwm_roll_r = balance_pd_to_pwm(-roll_err, -u_roll);
 
     corr_l = (float)(pwm_pitch_l + pwm_roll_l);
     corr_r = (float)(pwm_pitch_r + pwm_roll_r);
@@ -1806,13 +1923,8 @@ static void Motor_SetLeft(int16_t pwm)
 {
   __HAL_TIM_MOE_ENABLE(&htim1);
 
-  if (!pid_enabled && bal_output_active == 0U) {
+  if (pwm != 0) {
     pwm = apply_deadzone_comp(pwm, &left_running, &left_dir, &left_boost_until);
-  } else if (bal_output_active != 0U && pwm != 0) {
-    int16_t abs_p = (pwm > 0) ? pwm : (int16_t)(-pwm);
-    if (abs_p < (int16_t)BAL_PWM_MIN) {
-      pwm = (pwm > 0) ? (int16_t)BAL_PWM_MIN : (int16_t)(-BAL_PWM_MIN);
-    }
   }
   uint16_t duty = clamp_pwm(pwm);
 
@@ -1832,13 +1944,8 @@ static void Motor_SetRight(int16_t pwm)
 {
   __HAL_TIM_MOE_ENABLE(&htim1);
 
-  if (!pid_enabled && bal_output_active == 0U) {
+  if (pwm != 0) {
     pwm = apply_deadzone_comp(pwm, &right_running, &right_dir, &right_boost_until);
-  } else if (bal_output_active != 0U && pwm != 0) {
-    int16_t abs_p = (pwm > 0) ? pwm : (int16_t)(-pwm);
-    if (abs_p < (int16_t)BAL_PWM_MIN) {
-      pwm = (pwm > 0) ? (int16_t)BAL_PWM_MIN : (int16_t)(-BAL_PWM_MIN);
-    }
   }
   uint16_t duty = clamp_pwm(pwm);
 
@@ -2530,7 +2637,7 @@ static void VOFA_HandleLine(const char *line)
     cmd_left = 0;
     cmd_right = 0;
     const char reply_bal_test[] =
-      "BALTEST:1,满PWM测电机,倾斜>0.7deg应转,发BALTEST=0关\r\n";
+      "BALTEST:1,平衡车连续模式,摇杆回中,发BALTEST=0关\r\n";
     HAL_UART_Transmit(&huart3, (uint8_t *)reply_bal_test, sizeof(reply_bal_test) - 1U, 40);
     return;
   }
@@ -2792,6 +2899,8 @@ static void VOFA_HandleLine(const char *line)
   if (sscanf(cmd, "CH%d=%d", &ch, &duty_cmd) == 2)
   {
     uint32_t tim_ch = 0U;
+    int16_t test_left = 0;
+    int16_t test_right = 0;
 
     if (duty_cmd < 0) duty_cmd = 0;
     if (duty_cmd > PWM_MAX) duty_cmd = PWM_MAX;
@@ -2804,28 +2913,38 @@ static void VOFA_HandleLine(const char *line)
       default: tim_ch = 0U; break;
     }
 
-    cmd_left = 0;
-    cmd_right = 0;
+    ctrl_source = CTRL_SRC_UART;
+    pid_enabled = 0U;
+    if (ch == 1) {
+      test_left = (int16_t)duty_cmd;
+    } else if (ch == 2) {
+      test_left = (int16_t)(-duty_cmd);
+    } else if (ch == 4) {
+      test_right = (int16_t)duty_cmd;
+    } else if (ch == 3) {
+      test_right = (int16_t)(-duty_cmd);
+    }
+    cmd_left = test_left;
+    cmd_right = test_right;
     target_left = 0;
     target_right = 0;
     pid_reset_state();
-    __HAL_TIM_MOE_ENABLE(&htim1);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0U);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0U);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 0U);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, 0U);
 
     if (tim_ch != 0U && estop_triggered == 0U) {
-      __HAL_TIM_SET_COMPARE(&htim1, tim_ch, (uint32_t)duty_cmd);
+      Motor_Set(cmd_left, cmd_right);
+    } else {
+      Motor_Stop();
     }
 
     n = snprintf(
       reply,
       sizeof(reply),
-      "CH:%d,DUTY:%d,ESTOP:%u,MAP:1=PA8/AIN1,2=PA9/AIN2,3=PA10/BIN2,4=PA11/BIN1\r\n",
+      "CH:%d,DUTY:%d,ESTOP:%u,CMD:%d,%d,MAP:1=PA8/AIN1,2=PA9/AIN2,3=PA10/BIN2,4=PA11/BIN1\r\n",
       ch,
       duty_cmd,
-      (unsigned int)estop_triggered
+      (unsigned int)estop_triggered,
+      cmd_left,
+      cmd_right
     );
     if (n > 0) {
       uint16_t tx_len = (n < (int)sizeof(reply)) ? (uint16_t)n : (uint16_t)(sizeof(reply) - 1U);
