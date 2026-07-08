@@ -397,6 +397,51 @@
               <FilePath>../Core/Src/main.c</FilePath>
             </File>
             <File>
+              <FileName>pid.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/pid.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_ctrl.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/app_ctrl.c</FilePath>
+            </File>
+            <File>
+              <FileName>balance.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/balance.c</FilePath>
+            </File>
+            <File>
+              <FileName>cli_shell.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/cli_shell.c</FilePath>
+            </File>
+            <File>
+              <FileName>delay_us.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/delay_us.c</FilePath>
+            </File>
+            <File>
+              <FileName>h30.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/h30.c</FilePath>
+            </File>
+            <File>
+              <FileName>lamp.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/lamp.c</FilePath>
+            </File>
+            <File>
+              <FileName>motor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/motor.c</FilePath>
+            </File>
+            <File>
+              <FileName>ps2.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/ps2.c</FilePath>
+            </File>
+            <File>
               <FileName>gpio.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/gpio.c</FilePath>

@@ -68,9 +68,12 @@ void Error_Handler(void);
 #define PS2_CS_GPIO_Port GPIOB
 #define PS2_CLK_Pin GPIO_PIN_13
 #define PS2_CLK_GPIO_Port GPIOB
+#define LAMP_Pin GPIO_PIN_8
+#define LAMP_GPIO_Port GPIOC
 
 /* USER CODE BEGIN Private defines */
-
+/* TIM1 ARR=4199；CCR=4200 才是完整 100% 高电平，给 MG540 最大起转力；PID 输出钳位与此一致 */
+#define PWM_MAX 4200
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
