@@ -1,3 +1,7 @@
+/**
+ * @file    lamp.h
+ * @brief   示警灯接口：开/关/翻转/查询
+ */
 #ifndef LAMP_H
 #define LAMP_H
 

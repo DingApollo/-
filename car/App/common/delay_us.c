@@ -1,3 +1,8 @@
+/**
+ * @file    delay_us.c
+ * @brief   微秒延时：优先 DWT 周期计数器，失败退化为 NOP 循环估时
+ * @note    供 PS2 软件时序等使用；依赖 SystemCoreClock
+ */
 #include "delay_us.h"
 #include "main.h"
 

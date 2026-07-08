@@ -337,7 +337,7 @@
               <MiscControls></MiscControls>
               <Define>USE_HAL_DRIVER,STM32F407xx</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include</IncludePath>
+              <IncludePath>../Core/Inc;../App/common;../App/motor;../App/imu;../App/remote;../App/shell;../App/lamp;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -395,51 +395,6 @@
               <FileName>main.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/main.c</FilePath>
-            </File>
-            <File>
-              <FileName>pid.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/pid.c</FilePath>
-            </File>
-            <File>
-              <FileName>app_ctrl.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/app_ctrl.c</FilePath>
-            </File>
-            <File>
-              <FileName>balance.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/balance.c</FilePath>
-            </File>
-            <File>
-              <FileName>cli_shell.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/cli_shell.c</FilePath>
-            </File>
-            <File>
-              <FileName>delay_us.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/delay_us.c</FilePath>
-            </File>
-            <File>
-              <FileName>h30.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/h30.c</FilePath>
-            </File>
-            <File>
-              <FileName>lamp.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/lamp.c</FilePath>
-            </File>
-            <File>
-              <FileName>motor.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/motor.c</FilePath>
-            </File>
-            <File>
-              <FileName>ps2.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/ps2.c</FilePath>
             </File>
             <File>
               <FileName>gpio.c</FileName>
@@ -516,6 +471,81 @@
               <FileName>stm32f4xx_hal_msp.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/stm32f4xx_hal_msp.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>App/common</GroupName>
+          <Files>
+            <File>
+              <FileName>app_ctrl.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../App/common/app_ctrl.c</FilePath>
+            </File>
+            <File>
+              <FileName>delay_us.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../App/common/delay_us.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>App/motor</GroupName>
+          <Files>
+            <File>
+              <FileName>motor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../App/motor/motor.c</FilePath>
+            </File>
+            <File>
+              <FileName>pid.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../App/motor/pid.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>App/imu</GroupName>
+          <Files>
+            <File>
+              <FileName>h30.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../App/imu/h30.c</FilePath>
+            </File>
+            <File>
+              <FileName>balance.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../App/imu/balance.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>App/remote</GroupName>
+          <Files>
+            <File>
+              <FileName>ps2.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../App/remote/ps2.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>App/shell</GroupName>
+          <Files>
+            <File>
+              <FileName>cli_shell.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../App/shell/cli_shell.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>App/lamp</GroupName>
+          <Files>
+            <File>
+              <FileName>lamp.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../App/lamp/lamp.c</FilePath>
             </File>
           </Files>
         </Group>

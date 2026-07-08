@@ -1,3 +1,11 @@
+/**
+ * @file    cli_shell.c
+ * @brief   串口命令行：USART3(115200) 文本行协议，调试与控制入口
+ * @note    命令示例: "左,右"目标值 / PID=1 / CTRL=PS2 / BAL=1 / H30STAT /
+ *          LAMP=1 / STATUS / KP= KI= KD= / SAVE(存Flash) / PLOT=1(绘图流)
+ *          接收采用 ReceiveToIdle 中断 + 主循环兜底重挂与错误恢复
+ *          依赖: usart.h(USART3) 及各功能模块
+ */
 #include "cli_shell.h"
 #include <stdio.h>
 #include <string.h>

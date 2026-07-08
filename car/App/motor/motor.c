@@ -1,3 +1,11 @@
+/**
+ * @file    motor.c
+ * @brief   电机驱动：AT8236 双路 H 桥，TIM1 CH1~CH4 输出 PWM
+ * @note    引脚: PA8/PA9=AIN1/AIN2(丝印A路), PA10/PA11=BIN2/BIN1(丝印B路)
+ *          左右/前后方向由 motor.h 中 MOTOR_SWAP_LR / MOTOR_SWAP_FB 宏统一映射
+ *          含起转死区补偿(PWM_START_MIN)与启动助推(BOOST)；比例模式供平衡小幅修正用
+ *          依赖: tim.h(TIM1), app_state.h(急停标志)
+ */
 #include "motor.h"
 
 static uint8_t left_running = 0;

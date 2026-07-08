@@ -1,3 +1,7 @@
+/**
+ * @file    balance.h
+ * @brief   平衡辅助接口：PD 参数/零点/跌倒判定阈值/修正叠加入口
+ */
 #ifndef BALANCE_H
 #define BALANCE_H
 

@@ -1,3 +1,11 @@
+/**
+ * @file    h30.c
+ * @brief   WHEELTEC H30 惯导：USART2 逐字节接收、67字节帧同步与校验解析
+ * @note    引脚: PA2=TX, PA3=RX，默认波特率 460800（可 H30BAUD= 命令改）
+ *          输出: 姿态(pitch/roll/yaw)、角速度、加速度、四元数（×1e-6 定标）
+ *          含在线超时判定、波特率扫描、UART 错误自恢复
+ *          依赖: usart.h(USART2)
+ */
 #include "h30.h"
 #include <string.h>
 #include <stdio.h>

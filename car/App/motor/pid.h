@@ -1,3 +1,7 @@
+/**
+ * @file    pid.h
+ * @brief   速度 PID 接口：增量计算/状态复位/用户速度映射/Flash 存取参数
+ */
 #ifndef PID_H
 #define PID_H
 

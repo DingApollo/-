@@ -1,3 +1,7 @@
+/**
+ * @file    cli_shell.h
+ * @brief   串口命令行接口：USART3 接收状态、绘图模式开关、命令分发入口
+ */
 #ifndef CLI_SHELL_H
 #define CLI_SHELL_H
 

@@ -1,3 +1,7 @@
+/**
+ * @file    motor.h
+ * @brief   电机驱动接口：PWM 设置/停止/方向映射宏/死区补偿参数
+ */
 #ifndef MOTOR_H
 #define MOTOR_H
 

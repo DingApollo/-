@@ -1,3 +1,8 @@
+/**
+ * @file    lamp.c
+ * @brief   示警灯控制：PC8 → MOS 管 SIGN 脚，高电平点亮（可宏改极性）
+ * @note    依赖: main.h(LAMP_Pin/LAMP_GPIO_Port)
+ */
 #include "lamp.h"
 #include "main.h"
 

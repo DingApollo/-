@@ -1,3 +1,10 @@
+/**
+ * @file    balance.c
+ * @brief   平衡辅助：以 H30 俯仰/横滚角做 PD 修正并叠加到电机输出
+ * @note    示警桩模式下横滚修正左右同向（BAL_ROLL_DIFFERENTIAL=0，非平衡车差速）
+ *          含自动零点采集、角度/角速度死区、跌倒判定（超限且角速度小则停）
+ *          依赖: h30.h(姿态源), main.h
+ */
 #include "balance.h"
 #include "h30.h"
 #include <string.h>

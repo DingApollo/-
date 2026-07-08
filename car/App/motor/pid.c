@@ -1,3 +1,10 @@
+/**
+ * @file    pid.c
+ * @brief   双轮速度 PID 闭环（10ms 周期）+ 前馈；参数可存入片内 Flash
+ * @note    编码器: TIM2/TIM4 正交解码，速度=每周期计数增量
+ *          Flash 存参地址按 F407VET6(512KB) 的 Sector7 布局，换 VGT6 需改 pid.h
+ *          依赖: main.h(PWM_MAX), HAL Flash 驱动
+ */
 #include "pid.h"
 #include <string.h>
 #include "stm32f4xx_hal_flash.h"

@@ -1,3 +1,10 @@
+/**
+ * @file    ps2.c
+ * @brief   PS2 无线手柄：GPIO 软件模拟 SPI 时序读帧，摇杆/按键映射为左右轮指令
+ * @note    引脚: PB0=DAT, PB1=CMD, PB12=CS, PB13=CLK；20ms 轮询，300ms 失联清零
+ *          L1 键控制示警灯；手柄摇杆动作时暂停平衡修正（ps2_drive_quiet）
+ *          依赖: delay_us(时序), motor/pid/balance/app_ctrl/lamp
+ */
 #include "ps2.h"
 #include "delay_us.h"
 #include "motor.h"

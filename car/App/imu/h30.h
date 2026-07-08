@@ -1,3 +1,7 @@
+/**
+ * @file    h30.h
+ * @brief   WHEELTEC H30 惯导接口：帧结构定义、解析状态、波特率/恢复控制
+ */
 #ifndef H30_H
 #define H30_H
 

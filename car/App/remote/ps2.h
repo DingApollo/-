@@ -1,3 +1,8 @@
+/**
+ * @file    ps2.h
+ * @brief   PS2 手柄接口：GPIO 位操作宏、按键位定义、轮询/失联参数
+ * @note    引脚: PB0=DAT, PB1=CMD, PB12=CS, PB13=CLK（软件模拟时序）
+ */
 #ifndef PS2_H
 #define PS2_H
 
