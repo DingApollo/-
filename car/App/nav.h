@@ -39,6 +39,14 @@ void Nav_UpdateGPS(float x_gps, float y_gps);
 /* 读当前估计 */
 Nav_Pose Nav_GetPose(void);
 
+/* ---------- 打滑检测(编码器 vs 陀螺交叉验证) ----------
+ * 用途:驱动轮离地空转时,编码器虚报位移会污染 SLAM。
+ *      上层(香橙派)读到 slip=1 应丢弃或大幅降权这一段里程计。
+ * 说明:检测在 Nav_UpdateOdometry() 内部自动完成,无需额外调用。 */
+uint8_t  Nav_IsSlipping(void);      /* 1=当前判定打滑,里程计不可信 */
+float    Nav_GetSlipResidual(void); /* 最近一拍角速度残差(rad/s),调阈值用 */
+uint32_t Nav_GetSlipCount(void);    /* 上电以来累计打滑次数,诊断底盘/路面 */
+
 /* ---------- 控制层:位置环(go-to-goal) ---------- */
 /* 给一个目标点,算出左右轮速度目标(单位=编码器计数/周期,直接写 target_left/right)。
  * 返回值经 arrived 输出是否到点。*/

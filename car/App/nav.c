@@ -22,6 +22,13 @@ static int      g_traj_n;      /* 已录点数 */
 static int      g_rep_idx;     /* 复现游标 */
 static int      g_rep_dir;     /* +1 正序 / -1 倒序 */
 
+/* 打滑检测状态 */
+static uint8_t  g_slip;        /* 当前判定:1=打滑 */
+static float    g_slip_res;    /* 最近一拍角速度残差(rad/s) */
+static uint32_t g_slip_cnt;    /* 累计打滑次数 */
+static uint8_t  g_slip_set_n;  /* 连续超限拍数(消抖) */
+static uint8_t  g_slip_clr_n;  /* 连续正常拍数(消抖) */
+
 /* ============================ 小工具 ============================ */
 /* 归一化到 (-pi, pi];角度处理漏了这步会导致原地打转,务必用 */
 static float wrap_pi(float a)
@@ -56,6 +63,12 @@ void Nav_Init(void)
     g_traj_n = 0;
     g_rep_idx = 0;
     g_rep_dir = 1;
+
+    g_slip = 0U;
+    g_slip_res = 0.0f;
+    g_slip_cnt = 0U;
+    g_slip_set_n = 0U;
+    g_slip_clr_n = 0U;
 }
 
 void Nav_ResetPose(float x, float y, float theta)
@@ -76,21 +89,74 @@ void Nav_UpdateOdometry(int32_t enc_l, int32_t enc_r, float gyro_z)
     float dR = (float)(NAV_ENC_SIGN_R * enc_r) * NAV_METER_PER_COUNT;
     float ds = 0.5f * (dL + dR);              /* 车体中心前进量 */
 
-    /* --- 航向互补滤波: 高频信陀螺(不怕打滑) + 低频用编码器纠偏 --- */
     float dtheta_enc  = (dR - dL) / NAV_TRACK_L;    /* 编码器推的角增量 */
     float dtheta_gyro = gyro_z * NAV_DT;            /* 陀螺推的角增量 */
-    g_pose.theta += NAV_HEADING_GYRO_W * dtheta_gyro
-                  + (1.0f - NAV_HEADING_GYRO_W) * dtheta_enc;
-    g_pose.theta = wrap_pi(g_pose.theta);
+
+    /* ================= 打滑检测 =================
+     * 编码器推算的角速度 vs 陀螺实测角速度。
+     * 驱动轮离地空转 -> 编码器"看见"转动,车体实际没转 -> 残差暴露。 */
+    float omega_enc = dtheta_enc / NAV_DT;
+    float residual  = fabsf(omega_enc - gyro_z);
+    uint8_t moving;
+
+    g_slip_res = residual;
+
+    /* 车基本没动时不判定,避免静止时陀螺零偏/噪声误报 */
+    moving = ((fabsf(omega_enc) > NAV_SLIP_MIN_MOTION) ||
+              (fabsf(gyro_z)    > NAV_SLIP_MIN_MOTION) ||
+              (fabsf(ds)        > NAV_SLIP_MIN_MOTION * NAV_DT)) ? 1U : 0U;
+
+    if (moving && (residual > NAV_SLIP_GATE)) {
+        g_slip_clr_n = 0U;
+        if (g_slip_set_n < 255U) g_slip_set_n++;
+        if (!g_slip && (g_slip_set_n >= NAV_SLIP_SET_N)) {
+            g_slip = 1U;
+            g_slip_cnt++;
+        }
+    } else {
+        g_slip_set_n = 0U;
+        if (g_slip_clr_n < 255U) g_slip_clr_n++;
+        if (g_slip && (g_slip_clr_n >= NAV_SLIP_CLR_N)) {
+            g_slip = 0U;
+        }
+    }
+
+#if NAV_SLIP_CONSERVATIVE
+    /* 打滑时取两轮中位移较小者:空转轮读数虚高,着地轮才可信。
+     * 仅在已判定打滑时启用——正常转弯两轮本就不等长,不能一概取小。 */
+    if (g_slip) {
+        float aL = fabsf(dL);
+        float aR = fabsf(dR);
+        float mag = (aL < aR) ? aL : aR;
+        ds = (ds >= 0.0f) ? mag : -mag;
+    }
+#endif
+
+    /* --- 航向互补滤波: 高频信陀螺(不怕打滑) + 低频用编码器纠偏 ---
+     * 打滑期间编码器航向完全不可信,权重切到 100% 陀螺 */
+    {
+        float w_gyro = g_slip ? 1.0f : NAV_HEADING_GYRO_W;
+        g_pose.theta += w_gyro * dtheta_gyro + (1.0f - w_gyro) * dtheta_enc;
+        g_pose.theta = wrap_pi(g_pose.theta);
+    }
 
     /* --- 用融合后的航向把前进量投影到 x/y --- */
     g_pose.x += ds * cosf(g_pose.theta);
     g_pose.y += ds * sinf(g_pose.theta);
 
-    /* --- 没有绝对参照,不确定度只增(这就是漂移) --- */
-    g_pose.Px += NAV_EKF_Q;
-    g_pose.Py += NAV_EKF_Q;
+    /* --- 没有绝对参照,不确定度只增(这就是漂移);
+     *     打滑期间抬高过程噪声,等于告诉上层"这段别信我" --- */
+    {
+        float q = g_slip ? NAV_EKF_Q_SLIP : NAV_EKF_Q;
+        g_pose.Px += q;
+        g_pose.Py += q;
+    }
 }
+
+/* ---------- 打滑检测查询接口 ---------- */
+uint8_t  Nav_IsSlipping(void)      { return g_slip; }
+float    Nav_GetSlipResidual(void) { return g_slip_res; }
+uint32_t Nav_GetSlipCount(void)    { return g_slip_cnt; }
 
 void Nav_UpdateGPS(float x_gps, float y_gps)
 {
