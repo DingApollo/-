@@ -26,6 +26,12 @@ static int      g_traj_n;      /* 已录点数 */
 static int      g_rep_idx;     /* 复现游标 */
 static int      g_rep_dir;     /* +1 正序 / -1 倒序 */
 
+/* GPS 采纳/拒收统计 */
+static uint32_t g_gps_accept;
+static uint32_t g_gps_reject;
+static uint16_t g_gps_reject_run;  /* 连续拒收计数(防滤波发散) */
+static uint32_t g_gps_reset;       /* 强制重定位次数 */
+
 /* 打滑检测状态 */
 static uint8_t  g_slip;        /* 当前判定:1=打滑 */
 static float    g_slip_res;    /* 最近一拍角速度残差(rad/s) */
@@ -75,6 +81,11 @@ void Nav_Init(void)
     g_slip_cnt = 0U;
     g_slip_set_n = 0U;
     g_slip_clr_n = 0U;
+
+    g_gps_accept = 0U;
+    g_gps_reject = 0U;
+    g_gps_reject_run = 0U;
+    g_gps_reset = 0U;
 }
 
 void Nav_ResetPose(float x, float y, float theta)
@@ -151,9 +162,12 @@ void Nav_UpdateOdometry(int32_t enc_l, int32_t enc_r, float gyro_z)
     g_pose.y += ds * sinf(g_pose.theta);
 
     /* --- 没有绝对参照,不确定度只增(这就是漂移);
-     *     打滑期间抬高过程噪声,等于告诉上层"这段别信我" --- */
+     *     打滑期间抬高过程噪声,等于告诉上层"这段别信我"。
+     *     里程计误差主要随走过的距离累积,故按 |ds| 追加一项——
+     *     少了这项 Px 会被严重低估,导致 GPS 纠偏被马氏门限全部拒掉。 */
     {
-        float q = g_slip ? NAV_EKF_Q_SLIP : NAV_EKF_Q;
+        float q = (g_slip ? NAV_EKF_Q_SLIP : NAV_EKF_Q)
+                + NAV_EKF_Q_DIST * fabsf(ds);
         g_pose.Px += q;
         g_pose.Py += q;
     }
@@ -167,19 +181,84 @@ uint32_t Nav_GetSlipCount(void)    { return g_slip_cnt; }
 /* ---------- 脚轮预对齐状态查询 ---------- */
 uint8_t  Nav_IsCasterAligning(void) { return (g_align_ticks > 0U) ? 1U : 0U; }
 
-void Nav_UpdateGPS(float x_gps, float y_gps)
+float Nav_GpsRFromQuality(uint8_t fix_type, uint8_t sats, float hdop)
 {
-    /* x 轴一维卡尔曼: K = P/(P+R) = "这次该信 GPS 几分" */
-    float Kx = g_pose.Px / (g_pose.Px + NAV_EKF_R_GPS);
-    g_pose.x  += Kx * (x_gps - g_pose.x);
+    float r;
+
+    /* 硬门限:不满足直接判该帧不可用 */
+    if (fix_type == 0U) return 0.0f;                 /* 无效解 */
+    if (sats < NAV_GPS_MIN_SATS) return 0.0f;        /* 星数不足 */
+    if (hdop > NAV_GPS_MAX_HDOP) return 0.0f;        /* 几何精度差 */
+
+    switch (fix_type) {
+        case 4U:  r = NAV_GPS_R_RTK_FIX;   break;    /* RTK 固定解 */
+        case 5U:  r = NAV_GPS_R_RTK_FLOAT; break;    /* RTK 浮点解 */
+        case 2U:  r = NAV_GPS_R_DGPS;      break;    /* 差分 */
+        default:  r = NAV_GPS_R_SPS;       break;    /* 单点 */
+    }
+
+    /* HDOP 越大越不可信,按比例放大方差 */
+    r *= (1.0f + hdop);
+    return r;
+}
+
+uint8_t Nav_UpdateGPS(float x_gps, float y_gps, float r_gps)
+{
+    float dx, dy, sx, sy, d2, Kx, Ky;
+
+    /* r<=0 约定为"该帧不可用"(由 Nav_GpsRFromQuality 判出) */
+    if (r_gps <= 0.0f) {
+        g_gps_reject++;
+        return 0U;
+    }
+
+    dx = x_gps - g_pose.x;
+    dy = y_gps - g_pose.y;
+    sx = g_pose.Px + r_gps;
+    sy = g_pose.Py + r_gps;
+
+    /* --- 马氏距离门限: 防多路径突跳 ---
+     * 偏差按"估计不确定度+观测不确定度"归一化再判。
+     * 于是里程计漂久了(Px大)能接受大修正,刚校正过(Px小)则拒绝突跳。*/
+    d2 = (dx * dx) / sx + (dy * dy) / sy;
+    if (d2 > NAV_GPS_GATE_CHI2) {
+        g_gps_reject++;
+        if (g_gps_reject_run < 65535U) g_gps_reject_run++;
+
+        /* --- 连续拒收保护(防滤波发散) ---
+         * 连续拒这么多帧,只有两种可能:滤波器过度自信(Px被低估),
+         * 或里程计已经跑飞。两种情况都必须强制以 GPS 重定位,
+         * 否则门限会把正确的观测一直挡在外面,永久锁死。 */
+        if (g_gps_reject_run >= NAV_GPS_REJECT_RESET_N) {
+            g_pose.x  = x_gps;
+            g_pose.y  = y_gps;
+            g_pose.Px = r_gps;      /* 重定位后不确定度就是这帧 GPS 的 */
+            g_pose.Py = r_gps;
+            g_gps_reject_run = 0U;
+            g_gps_reset++;
+            return 2U;              /* 2 = 已强制重定位 */
+        }
+        return 0U;
+    }
+    g_gps_reject_run = 0U;
+
+    /* 一维卡尔曼(每轴独立): K = P/(P+R) = "这次该信 GPS 几分" */
+    Kx = g_pose.Px / sx;
+    g_pose.x  += Kx * dx;
     g_pose.Px *= (1.0f - Kx);
 
-    float Ky = g_pose.Py / (g_pose.Py + NAV_EKF_R_GPS);
-    g_pose.y  += Ky * (y_gps - g_pose.y);
+    Ky = g_pose.Py / sy;
+    g_pose.y  += Ky * dy;
     g_pose.Py *= (1.0f - Ky);
 
     /* 注意: 不纠 theta —— GPS 静止时航向不可靠,航向永远交给陀螺 */
+    g_gps_accept++;
+    return 1U;
 }
+
+uint32_t Nav_GetGpsAcceptCount(void) { return g_gps_accept; }
+uint32_t Nav_GetGpsRejectCount(void) { return g_gps_reject; }
+uint32_t Nav_GetGpsResetCount(void)  { return g_gps_reset; }
 
 /* ============================ 控制层: 位置环 ============================ */
 void Nav_GotoPoint(float xt, float yt,

@@ -10,7 +10,9 @@
  *   3) 每个 control_tick(已算好 speed_left/right = 编码器计数增量):
  *        float gyro_z = (float)h30.gyro.z * 1e-6f;   // rad/s(按现有换算)
  *        Nav_UpdateOdometry(speed_left, speed_right, gyro_z);
- *   4) GPS 来一帧且质量好时:  Nav_UpdateGPS(x_gps_m, y_gps_m);
+ *   4) GPS 来一帧时(质量判定已内置,直接调即可):
+ *        float r = Nav_GpsRFromQuality(fix_type, sats, hdop);
+ *        Nav_UpdateGPS(x_gps_m, y_gps_m, r);   // r=0 或突跳会被自动拒收
  *   5) 自主行驶时(非 PS2、pid_enabled=1),用位置环产生速度目标:
  *        int16_t tl, tr; uint8_t arrived;
  *        Nav_RepeatStep(&tl, &tr, &arrived);   // 或 Nav_GotoPoint(...)
@@ -34,8 +36,22 @@ void Nav_ResetPose(float x, float y, float theta);  /* 设原点/重定位 */
 /* ---------- 估计层 ---------- */
 /* 高频预测:enc_l/enc_r = 本周期左右编码器计数增量;gyro_z = rad/s */
 void Nav_UpdateOdometry(int32_t enc_l, int32_t enc_r, float gyro_z);
-/* 低频纠偏:仅在 GPS 质量好时调用;x/y 为局部平面坐标(米) */
-void Nav_UpdateGPS(float x_gps, float y_gps);
+/* 低频纠偏:x/y 为局部平面坐标(米),r_gps 为该帧的观测方差(m^2,越大越不信)。
+ * r_gps 建议用 Nav_GpsRFromQuality() 由星数/HDOP/定位类型算出;
+ * 传 0 或负值表示该帧不可用,函数直接返回 0。
+ * 内部带马氏距离门限,疑似多路径突跳会被拒收。
+ * 返回:1=已采纳并纠偏  0=被拒绝(质量差或突跳)  2=连续拒收过多,已强制重定位 */
+uint8_t Nav_UpdateGPS(float x_gps, float y_gps, float r_gps);
+
+/* 由 GPS 质量指标换算观测方差。fix_type 用 NMEA GGA 第6字段:
+ *   0=无效 1=单点 2=差分 4=RTK固定解 5=RTK浮点解
+ * 返回 0 表示该帧不该用(星数不足/HDOP过大/无效解)。 */
+float Nav_GpsRFromQuality(uint8_t fix_type, uint8_t sats, float hdop);
+
+/* GPS 采纳/拒收计数,用于现场判断门限是否过严或过松 */
+uint32_t Nav_GetGpsAcceptCount(void);
+uint32_t Nav_GetGpsRejectCount(void);
+uint32_t Nav_GetGpsResetCount(void);   /* 强制重定位次数;经常>0 说明里程计或门限有问题 */
 /* 读当前估计 */
 Nav_Pose Nav_GetPose(void);
 
