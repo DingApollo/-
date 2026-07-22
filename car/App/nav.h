@@ -47,6 +47,9 @@ uint8_t  Nav_IsSlipping(void);      /* 1=当前判定打滑,里程计不可信 *
 float    Nav_GetSlipResidual(void); /* 最近一拍角速度残差(rad/s),调阈值用 */
 uint32_t Nav_GetSlipCount(void);    /* 上电以来累计打滑次数,诊断底盘/路面 */
 
+/* 1=正处于脚轮预对齐窗口(起步/换向后的低速段),调试观察用 */
+uint8_t  Nav_IsCasterAligning(void);
+
 /* ---------- 控制层:位置环(go-to-goal) ---------- */
 /* 给一个目标点,算出左右轮速度目标(单位=编码器计数/周期,直接写 target_left/right)。
  * 返回值经 arrived 输出是否到点。*/

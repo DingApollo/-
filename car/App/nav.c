@@ -15,6 +15,10 @@ static Nav_Pose g_pose;
 
 /* 位置环速度斜坡的上一拍值(用于加速度限幅=梯形) */
 static float g_v_prev;
+/* 上一拍的角速度指令(用于判换向,触发脚轮预对齐) */
+static float g_w_prev;
+/* 脚轮预对齐剩余拍数;>0 表示正处于预对齐窗口 */
+static uint16_t g_align_ticks;
 
 /* 示教轨迹缓存 */
 static Nav_Pose g_traj[NAV_TRAJ_MAX];
@@ -60,6 +64,8 @@ void Nav_Init(void)
     g_pose.x = g_pose.y = g_pose.theta = 0.0f;
     g_pose.Px = g_pose.Py = 0.0f;
     g_v_prev = 0.0f;
+    g_w_prev = 0.0f;
+    g_align_ticks = 0U;
     g_traj_n = 0;
     g_rep_idx = 0;
     g_rep_dir = 1;
@@ -158,6 +164,9 @@ uint8_t  Nav_IsSlipping(void)      { return g_slip; }
 float    Nav_GetSlipResidual(void) { return g_slip_res; }
 uint32_t Nav_GetSlipCount(void)    { return g_slip_cnt; }
 
+/* ---------- 脚轮预对齐状态查询 ---------- */
+uint8_t  Nav_IsCasterAligning(void) { return (g_align_ticks > 0U) ? 1U : 0U; }
+
 void Nav_UpdateGPS(float x_gps, float y_gps)
 {
     /* x 轴一维卡尔曼: K = P/(P+R) = "这次该信 GPS 几分" */
@@ -199,7 +208,37 @@ void Nav_GotoPoint(float xt, float yt,
     uint8_t done = (rho < NAV_ARRIVE_R) ? 1U : 0U;
     if (done) { v = 0.0f; w = 0.0f; }
 
+#if NAV_CASTER_ALIGN_EN
+    /* ---------- 脚轮预对齐 ----------
+     * 起步或换向时,万向轮要先绕立轴摆到新方向,这期间胎面横向蹭地把车推偏。
+     * 头 NAV_CASTER_ALIGN_MS 用极低速走完这段,把横移压到最小。 */
+    {
+        uint8_t was_still = (fabsf(g_v_prev) < NAV_CASTER_FLIP_DZ) &&
+                            (fabsf(g_w_prev) < NAV_CASTER_FLIP_DZ);
+        uint8_t want_move = (fabsf(v) > NAV_CASTER_FLIP_DZ) ||
+                            (fabsf(w) > NAV_CASTER_FLIP_DZ);
+        /* 换向:前后(或转向)符号翻转,且两拍都确实在动(带死区,防噪声反复触发) */
+        uint8_t v_flip = ((v * g_v_prev) < 0.0f) &&
+                         (fabsf(v) > NAV_CASTER_FLIP_DZ) &&
+                         (fabsf(g_v_prev) > NAV_CASTER_FLIP_DZ);
+        uint8_t w_flip = ((w * g_w_prev) < 0.0f) &&
+                         (fabsf(w) > NAV_CASTER_FLIP_DZ) &&
+                         (fabsf(g_w_prev) > NAV_CASTER_FLIP_DZ);
+
+        if ((was_still && want_move) || v_flip || w_flip) {
+            g_align_ticks = (uint16_t)NAV_CASTER_ALIGN_TICKS;
+        }
+
+        if (g_align_ticks > 0U) {
+            g_align_ticks--;
+            v = clampf(v, -NAV_CASTER_ALIGN_V, NAV_CASTER_ALIGN_V);
+            w = clampf(w, -NAV_CASTER_ALIGN_W, NAV_CASTER_ALIGN_W);
+        }
+    }
+#endif
+
     g_v_prev = v;
+    g_w_prev = w;
 
     /* (v,w) -> 左右轮线速度(m/s) -> 编码器计数/周期 */
     float vL = v - w * NAV_TRACK_L * 0.5f;
@@ -226,6 +265,8 @@ void Nav_RepeatReset(void)
     g_rep_dir = 1;
     g_rep_idx = 0;
     g_v_prev = 0.0f;
+    g_w_prev = 0.0f;
+    g_align_ticks = 0U;   /* 下一拍会因"静止->起步"重新触发预对齐 */
 }
 
 void Nav_RepeatReverse(void)      /* 撤收: 从末点倒着走回起点 */
@@ -233,6 +274,8 @@ void Nav_RepeatReverse(void)      /* 撤收: 从末点倒着走回起点 */
     g_rep_dir = -1;
     g_rep_idx = (g_traj_n > 0) ? (g_traj_n - 1) : 0;
     g_v_prev = 0.0f;
+    g_w_prev = 0.0f;
+    g_align_ticks = 0U;   /* 倒序起步同样需要脚轮重新摆正 */
 }
 
 void Nav_RepeatStep(int16_t *tgt_left, int16_t *tgt_right, uint8_t *done)
