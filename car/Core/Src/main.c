@@ -38,6 +38,8 @@
 #include "app_state.h"
 #include "cli_shell.h"
 #include "lamp.h"
+#include "adc.h"
+#include "battery.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -96,7 +98,9 @@ int main(void)
   MX_USART2_UART_Init();
   MX_USART3_UART_Init();
   MX_TIM3_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
+  Battery_Init();
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
@@ -230,6 +234,14 @@ int main(void)
     if ((HAL_GetTick() - h30_watch_tick) >= 1000U) {
       h30_watch_tick = HAL_GetTick();
       h30_ensure_rx();
+    }
+
+    {
+      static uint32_t bat_tick = 0;
+      if ((HAL_GetTick() - bat_tick) >= 100U) {
+        bat_tick = HAL_GetTick();
+        Battery_Update();
+      }
     }
 
     balance_auto_update();

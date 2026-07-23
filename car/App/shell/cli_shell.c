@@ -23,6 +23,7 @@
 #include "app_ctrl.h"
 #include "app_state.h"
 #include "lamp.h"
+#include "battery.h"
 
 static uint8_t uart3_buf[32];
 static char uart3_line_buf[96];
@@ -900,6 +901,24 @@ void cli_shell_handle_line(const char *line)
     return;
   }
 
+  if (strcmp(cmd, "BAT?") == 0)
+  {
+    /* 电池电压监测：接 D157B 1/11 分压 → PA4(ADC1_IN4)
+     * RAW=ADC原始值(标定用)，V=电池电压，LVL=0正常/1告警/2限速/3截止 */
+    n = snprintf(
+      reply,
+      sizeof(reply),
+      "BAT:V=%.2f,RAW=%u,LVL=%u\r\n",
+      (double)Battery_GetVoltage(),
+      (unsigned int)Battery_GetRaw(),
+      (unsigned int)Battery_GetLevel()
+    );
+    if (n > 0) {
+      HAL_UART_Transmit(&huart3, (uint8_t *)reply, (uint16_t)n, 20);
+    }
+    return;
+  }
+
   if (strcmp(cmd, "STATUS") == 0 || strcmp(cmd, "MODE?") == 0)
   {
     uint32_t c1 = __HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_1);
@@ -911,7 +930,7 @@ void cli_shell_handle_line(const char *line)
     n = snprintf(
       reply,
       sizeof(reply),
-      "STATUS:CTRL=%s,PID=%u,BAL=%u,BALZ=%u,BALF=%u,PLOT=%u,PS2EN=%u,PS2=%u,MODE=0x%02X,LX=%u,LY=%u,LAMP=%u,H30=%u,H30CNT=%lu,PIT:%.3f,ROL:%.3f,ESTOP=%u,CMD=%d,%d,TGT=%d,%d,SPD=%d,%d,CCR=%lu,%lu,%lu,%lu,BOOST=%u,%u\r\n",
+      "STATUS:CTRL=%s,PID=%u,BAL=%u,BALZ=%u,BALF=%u,PLOT=%u,PS2EN=%u,PS2=%u,MODE=0x%02X,LX=%u,LY=%u,LAMP=%u,H30=%u,H30CNT=%lu,PIT:%.3f,ROL:%.3f,ESTOP=%u,CMD=%d,%d,TGT=%d,%d,SPD=%d,%d,CCR=%lu,%lu,%lu,%lu,BOOST=%u,%u,BAT=%.2f,BLVL=%u\r\n",
       ctrl_source_name(),
       (unsigned int)pid_enabled,
       (unsigned int)bal_enabled,
@@ -940,7 +959,9 @@ void cli_shell_handle_line(const char *line)
       (unsigned long)c3,
       (unsigned long)c4,
       (unsigned int)boost_l,
-      (unsigned int)boost_r
+      (unsigned int)boost_r,
+      (double)Battery_GetVoltage(),
+      (unsigned int)Battery_GetLevel()
     );
     if (n > 0) {
       uint16_t tx_len = (n < (int)sizeof(reply)) ? (uint16_t)n : (uint16_t)(sizeof(reply) - 1U);
